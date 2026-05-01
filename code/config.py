@@ -1,0 +1,1 @@
+"""Configuration and path constants for the support triage pipeline."""

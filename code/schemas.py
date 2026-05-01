@@ -1,0 +1,1 @@
+"""Structured models and enums for tickets, retrieval, and outputs."""

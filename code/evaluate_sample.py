@@ -1,0 +1,1 @@
+"""Sample-set evaluation entrypoint for categorical comparison."""

@@ -1,0 +1,1 @@
+"""Optional provider wrapper for bounded response synthesis."""

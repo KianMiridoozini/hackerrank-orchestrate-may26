@@ -45,13 +45,13 @@ It tracks current progress, evidence, blockers, and decisions so that any AI ass
 
 ## Current Summary
 
-Last updated: `NOT_STARTED`
+Last updated: `VERIFIED`
 
-Updated by: `unknown`
+Updated by: `GitHub Copilot`
 
-Current focus: `Initial implementation has not started in this status file.`
+Current focus: `Step 1 is verified: the planned module layout exists under code/ and the Python stubs are syntax-safe.`
 
-Current recommended next action: `Read AGENTS.md, plan-overview.md, implementation-sequence.md, and this file, then start Step 1: create the module layout under code/.`
+Current recommended next action: `Start Step 2: define config and schema boundaries in code/config.py and code/schemas.py.`
 
 ---
 
@@ -160,7 +160,7 @@ Can be marked `VERIFIED` only when:
 
 | Step | Task | Status | Files touched | Evidence | Next action |
 |---|---|---|---|---|---|
-| 1 | Create module layout under `code/` | NOT_STARTED | - | - | Create the planned files before adding logic. |
+| 1 | Create module layout under `code/` | VERIFIED | `implementation-status.md`, `code/main.py`, `code/config.py`, `code/schemas.py`, `code/corpus.py`, `code/retriever.py`, `code/safety.py`, `code/taxonomy.py`, `code/llm.py`, `code/agent.py`, `code/evaluate_sample.py`, `code/README.md` | `list_dir code/` showed the planned file set and `get_errors` reported no errors for the touched Python stubs. | Start Step 2: define config and schema boundaries. |
 | 2 | Define config and schema boundaries | NOT_STARTED | - | - | Add path constants, provider settings, enums, and Pydantic models. |
 | 3 | Inspect sample header and implement CSV writer | NOT_STARTED | - | - | Read the sample CSV header and make writer mirror the expected format. |
 | 4 | Build CLI skeleton and placeholder agent flow | NOT_STARTED | - | - | Make `main.py` read rows, call placeholder agent, and write valid rows. |
@@ -407,3 +407,10 @@ Append short project-state updates here when useful. Do not use this as a replac
 - Agent: `unknown`
 - Summary: `implementation-status.md created. No implementation work has been verified yet.`
 - Evidence: `This file exists.`
+
+### Update 2
+
+- Timestamp: `2026-05-01T10:08:39.0463655+02:00`
+- Agent: `GitHub Copilot`
+- Summary: `Step 1 was completed by creating the planned module layout under code/ with minimal placeholder contents only.`
+- Evidence: `list_dir code/ showed all planned files and get_errors reported no errors for the touched Python files.`
