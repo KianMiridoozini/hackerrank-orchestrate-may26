@@ -49,9 +49,9 @@ Last updated: `VERIFIED`
 
 Updated by: `GitHub Copilot`
 
-Current focus: `Step 9 is verified: code/agent.py now normalizes ticket text, trusts explicit company values, and uses conservative retrieval-backed fallback only for specific missing-company queries.`
+Current focus: `Step 10 is verified: code/safety.py now applies deterministic escalation rules, fixed escalation templates, request-type heuristics, and weak-evidence checks.`
 
-Current recommended next action: `Start Step 10: implement deterministic safety rules and request-type heuristics in code/safety.py.`
+Current recommended next action: `Start Step 11: connect the deterministic baseline in code/agent.py by combining domain detection, safety gating, retrieval, product-area mapping, and deterministic output assembly.`
 
 ---
 
@@ -169,7 +169,7 @@ Can be marked `VERIFIED` only when:
 | 7 | Add heading-aware chunking | VERIFIED | `implementation-status.md`, `code/corpus.py`, `code/.cache/corpus_cache.json` | `get_errors` surfaced one local syntax issue which was repaired immediately; Python validation then confirmed the April 2026 release notes file split into 66 chunks with heading context, the Claude conversation-management FAQ stayed as one chunk, `code/.cache/corpus_cache.json` existed after the first build, and repeated artifact loads returned the same record and chunk counts (`773` records, `4788` chunks). | Start Step 8: implement lexical retrieval. |
 | 8 | Implement lexical retrieval | VERIFIED | `implementation-status.md`, `code/retriever.py` | A Python validation snippet built the BM25 index over `4788` cached chunks, confirmed a Claude conversation-management query returned only Claude-domain results and ranked `claude/claude/conversation-management/8230524-how-can-i-delete-or-rename-a-conversation.md` first, and confirmed a HackerRank release-notes query returned only HackerRank-domain results and ranked the matching release-notes heading chunk first with populated title, breadcrumbs, source path, score, and rank. | Start Step 9: implement conservative domain detection. |
 | 9 | Implement domain detection | VERIFIED | `implementation-status.md`, `code/agent.py` | A Python validation snippet confirmed an explicit Visa company value was trusted immediately, representative missing-company Claude and HackerRank tickets resolved to `Company.CLAUDE` and `Company.HACKERRANK`, `normalize_ticket()` populated `detected_company` for the Claude example, and an ambiguous generic account-help ticket stayed unresolved instead of guessing. | Start Step 10: implement deterministic safety rules and request-type heuristics. |
-| 10 | Implement safety and `request_type` rules | NOT_STARTED | - | - | Add deterministic escalation categories and request heuristics. |
+| 10 | Implement safety and `request_type` rules | VERIFIED | `implementation-status.md`, `code/safety.py` | A Python validation snippet confirmed fraud, account-access restoration, assessment-integrity, outage, malicious prompt-injection, feature-request, and weak-evidence examples all mapped to the expected deterministic `SafetyDecision` outcomes; outage mapped to `RequestType.BUG`, malicious content mapped to `RequestType.INVALID`, feature requests stayed non-escalated with `RequestType.FEATURE_REQUEST`, and `build_escalation_response()` returned a fixed template for an escalation category. | Start Step 11: connect the deterministic baseline in `code/agent.py`. |
 | 11 | Connect deterministic baseline | NOT_STARTED | - | - | Route, retrieve, escalate, map product area, and emit complete rows without LLM. |
 | 12 | Add sample evaluator | NOT_STARTED | - | - | Compare categorical outputs against sample. |
 | 13 | Tune deterministic baseline | NOT_STARTED | - | - | Fix structural routing, safety, taxonomy, and retrieval failures. |
@@ -470,3 +470,10 @@ Append short project-state updates here when useful. Do not use this as a replac
 - Agent: `GitHub Copilot`
 - Summary: `Step 9 updated code/agent.py with ticket normalization plus conservative domain detection that trusts explicit company values and only falls back to retrieval for specific missing-company queries.`
 - Evidence: `A Python validation snippet confirmed an explicit Visa ticket stayed Visa, representative missing-company Claude and HackerRank queries resolved correctly, `normalize_ticket()` populated `detected_company` for the Claude example, and a generic account-help query stayed unresolved after the retrieval threshold was tightened.`
+
+### Update 11
+
+- Timestamp: `2026-05-01T14:33:06.9577500+02:00`
+- Agent: `GitHub Copilot`
+- Summary: `Step 10 filled code/safety.py with deterministic escalation rules, request-type heuristics, fixed escalation templates, and a weak-evidence helper for later retrieval gating.`
+- Evidence: `A Python validation snippet confirmed representative fraud, account restoration, assessment dispute, outage, malicious prompt-injection, feature-request, and weak-evidence conflict cases all mapped to the expected `SafetyDecision` results, and `build_escalation_response()` returned a fixed escalation template.`
