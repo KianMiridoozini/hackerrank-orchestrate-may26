@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+import random
+import re
+import time
 from dataclasses import dataclass
 from typing import Any, Callable, Final, Generic, Mapping, TypeVar
 from urllib import error, parse, request
@@ -21,10 +24,23 @@ ModelT = TypeVar("ModelT", bound=SupportModel)
 Transport = Callable[[str, str, Mapping[str, str], dict[str, Any], int], dict[str, Any]]
 
 LLM_PROVIDER_ENV: Final[str] = "LLM_PROVIDER"
+LLM_RATE_LIMIT_RPM_ENV: Final[str] = "LLM_RATE_LIMIT_RPM"
+LLM_RATE_LIMIT_BURST_ENV: Final[str] = "LLM_RATE_LIMIT_BURST"
+LLM_RATE_LIMIT_MAX_WAIT_SECONDS_ENV: Final[str] = "LLM_RATE_LIMIT_MAX_WAIT_SECONDS"
 DEFAULT_MAX_OUTPUT_TOKENS: Final[int] = 320
 MAX_STRUCTURED_OUTPUT_ATTEMPTS: Final[int] = 2
 OPENAI_BASE_URL: Final[str] = "https://api.openai.com/v1"
 GEMINI_BASE_URL: Final[str] = "https://generativelanguage.googleapis.com/v1beta"
+MAX_TIMEOUT_PROVIDER_RETRIES: Final[int] = 1
+MAX_TRANSIENT_PROVIDER_RETRIES: Final[int] = 2
+PROVIDER_RETRY_BASE_DELAY_SECONDS: Final[float] = 0.75
+PROVIDER_RETRY_JITTER_SECONDS: Final[float] = 0.35
+PROVIDER_CIRCUIT_BREAKER_THRESHOLD: Final[int] = 3
+PROVIDER_CIRCUIT_BREAKER_COOLDOWN_SECONDS: Final[float] = 60.0
+DEFAULT_RATE_LIMIT_BURST_CAP: Final[int] = 4
+DEFAULT_RATE_LIMIT_MAX_WAIT_SECONDS: Final[float] = 2.0
+RETRY_DELAY_SECONDS_PATTERN: Final[re.Pattern[str]] = re.compile(r'retrydelay"\s*:\s*"([0-9]+(?:\.[0-9]+)?)s"', re.IGNORECASE)
+RETRY_IN_SECONDS_PATTERN: Final[re.Pattern[str]] = re.compile(r'retry in\s+([0-9]+(?:\.[0-9]+)?)s', re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -46,6 +62,9 @@ class ResolvedProviderConfig:
 	api_key_env: str
 	base_url: str
 	timeout_seconds: int = DEFAULT_PROVIDER_TIMEOUT_SECONDS
+	rate_limit_rpm: int | None = None
+	rate_limit_burst: int | None = None
+	rate_limit_max_wait_seconds: float = DEFAULT_RATE_LIMIT_MAX_WAIT_SECONDS
 
 
 @dataclass(frozen=True)
@@ -68,6 +87,28 @@ class StructuredOutputError(ValueError):
 	"""Raised when the provider does not return valid structured JSON."""
 
 
+@dataclass
+class _ProviderCircuitState:
+	"""Track retryable provider failures for one provider/model pair."""
+
+	consecutive_retryable_failures: int = 0
+	open_until_monotonic: float = 0.0
+	last_retryable_error: str | None = None
+
+
+@dataclass
+class _ProviderBudgetState:
+	"""Track local admission-control state for one provider/model pair."""
+
+	tokens: float = 0.0
+	last_refill_monotonic: float = 0.0
+	cooldown_until_monotonic: float = 0.0
+
+
+_PROVIDER_CIRCUIT_BREAKERS: dict[tuple[str, str], _ProviderCircuitState] = {}
+_PROVIDER_BUDGETS: dict[tuple[str, str], _ProviderBudgetState] = {}
+
+
 def _response_schema_dict(response_schema: type[ModelT]) -> dict[str, Any]:
 	if hasattr(response_schema, "model_json_schema"):
 		return response_schema.model_json_schema()
@@ -86,6 +127,292 @@ def _default_base_url(provider_name: str) -> str:
 	if provider_name == "gemini":
 		return GEMINI_BASE_URL
 	return ""
+
+
+def _provider_circuit_key(provider_config: ResolvedProviderConfig) -> tuple[str, str]:
+	return provider_config.provider_name, provider_config.model_name
+
+
+def _provider_circuit_state(provider_config: ResolvedProviderConfig) -> _ProviderCircuitState:
+	key = _provider_circuit_key(provider_config)
+	state = _PROVIDER_CIRCUIT_BREAKERS.get(key)
+	if state is None:
+		state = _ProviderCircuitState()
+		_PROVIDER_CIRCUIT_BREAKERS[key] = state
+	return state
+
+
+def _provider_budget_state(provider_config: ResolvedProviderConfig) -> _ProviderBudgetState:
+	key = _provider_circuit_key(provider_config)
+	state = _PROVIDER_BUDGETS.get(key)
+	if state is None:
+		state = _ProviderBudgetState()
+		_PROVIDER_BUDGETS[key] = state
+	return state
+
+
+def _reset_provider_circuit(provider_config: ResolvedProviderConfig) -> None:
+	state = _provider_circuit_state(provider_config)
+	state.consecutive_retryable_failures = 0
+	state.open_until_monotonic = 0.0
+	state.last_retryable_error = None
+
+
+def _record_retryable_provider_failure(
+	provider_config: ResolvedProviderConfig,
+	*,
+	error_text: str,
+) -> None:
+	state = _provider_circuit_state(provider_config)
+	state.consecutive_retryable_failures += 1
+	state.last_retryable_error = error_text
+	if state.consecutive_retryable_failures >= PROVIDER_CIRCUIT_BREAKER_THRESHOLD:
+		state.open_until_monotonic = time.monotonic() + PROVIDER_CIRCUIT_BREAKER_COOLDOWN_SECONDS
+
+
+def _provider_circuit_open_message(provider_config: ResolvedProviderConfig) -> str | None:
+	state = _provider_circuit_state(provider_config)
+	if state.open_until_monotonic <= 0.0:
+		return None
+
+	now_monotonic = time.monotonic()
+	if now_monotonic >= state.open_until_monotonic:
+		_reset_provider_circuit(provider_config)
+		return None
+
+	remaining_seconds = state.open_until_monotonic - now_monotonic
+	last_error = state.last_retryable_error or "retryable_provider_failures"
+	return (
+		"provider_circuit_open:"
+		f"{provider_config.provider_name}:{provider_config.model_name}:{remaining_seconds:.2f}:{last_error}"
+	)
+
+
+def _http_status_from_runtime_error(error_text: str) -> int | None:
+	if not error_text.startswith("http_error:"):
+		return None
+	parts = error_text.split(":", 2)
+	if len(parts) < 3:
+		return None
+	try:
+		return int(parts[1])
+	except ValueError:
+		return None
+
+
+def _parse_positive_int(value: str | None) -> int | None:
+	if value is None:
+		return None
+	try:
+		parsed = int(value.strip())
+	except (TypeError, ValueError):
+		return None
+	return parsed if parsed > 0 else None
+
+
+def _parse_non_negative_float(value: str | None) -> float | None:
+	if value is None:
+		return None
+	try:
+		parsed = float(value.strip())
+	except (TypeError, ValueError):
+		return None
+	return parsed if parsed >= 0.0 else None
+
+
+def _retry_after_seconds_from_error(error_text: str) -> float | None:
+	for pattern in (RETRY_DELAY_SECONDS_PATTERN, RETRY_IN_SECONDS_PATTERN):
+		match = pattern.search(error_text)
+		if match is None:
+			continue
+		try:
+			parsed = float(match.group(1))
+		except ValueError:
+			continue
+		if parsed > 0.0:
+			return parsed
+	return None
+
+
+def _is_terminal_quota_error(error_text: str) -> bool:
+	normalized_text = error_text.strip().lower()
+	if "insufficient_quota" in normalized_text:
+		return True
+	if "billing" in normalized_text and _retry_after_seconds_from_error(error_text) is None:
+		return True
+	return False
+
+
+def _retryable_provider_error_policy(error_text: str) -> tuple[str | None, int]:
+	normalized_text = error_text.strip().lower()
+	if normalized_text.startswith("network_error:timeout"):
+		return "timeout", MAX_TIMEOUT_PROVIDER_RETRIES
+
+	status_code = _http_status_from_runtime_error(error_text)
+	if status_code == 503:
+		return "service_unavailable", MAX_TRANSIENT_PROVIDER_RETRIES
+	if status_code == 429 and not _is_terminal_quota_error(error_text):
+		return "rate_limited", MAX_TRANSIENT_PROVIDER_RETRIES
+	if "rate limit" in normalized_text and not _is_terminal_quota_error(error_text):
+		return "rate_limited", MAX_TRANSIENT_PROVIDER_RETRIES
+	if _retry_after_seconds_from_error(error_text) is not None and not _is_terminal_quota_error(error_text):
+		return "rate_limited", MAX_TRANSIENT_PROVIDER_RETRIES
+	return None, 0
+
+
+def _provider_retry_delay_seconds(retry_number: int) -> float:
+	base_delay = PROVIDER_RETRY_BASE_DELAY_SECONDS * (2 ** max(retry_number - 1, 0))
+	jitter = random.uniform(0.0, PROVIDER_RETRY_JITTER_SECONDS)
+	return base_delay + jitter
+
+
+def _provider_budget_refill_rate(provider_config: ResolvedProviderConfig) -> float | None:
+	if provider_config.rate_limit_rpm is None:
+		return None
+	return provider_config.rate_limit_rpm / 60.0
+
+
+def _refill_provider_budget(provider_config: ResolvedProviderConfig, *, now_monotonic: float) -> _ProviderBudgetState:
+	state = _provider_budget_state(provider_config)
+	if provider_config.rate_limit_rpm is None or provider_config.rate_limit_burst is None:
+		return state
+	if state.last_refill_monotonic <= 0.0:
+		state.last_refill_monotonic = now_monotonic
+		state.tokens = float(provider_config.rate_limit_burst)
+		return state
+	replenish_rate = _provider_budget_refill_rate(provider_config)
+	if replenish_rate is None:
+		return state
+	elapsed_seconds = max(0.0, now_monotonic - state.last_refill_monotonic)
+	if elapsed_seconds > 0.0:
+		state.tokens = min(
+			float(provider_config.rate_limit_burst),
+			state.tokens + (elapsed_seconds * replenish_rate),
+		)
+		state.last_refill_monotonic = now_monotonic
+	return state
+
+
+def _apply_provider_cooldown(
+	provider_config: ResolvedProviderConfig,
+	*,
+	retry_after_seconds: float,
+) -> None:
+	state = _provider_budget_state(provider_config)
+	now_monotonic = time.monotonic()
+	state.cooldown_until_monotonic = max(
+		state.cooldown_until_monotonic,
+		now_monotonic + retry_after_seconds,
+	)
+	if provider_config.rate_limit_burst is not None:
+		state.tokens = 0.0
+		state.last_refill_monotonic = now_monotonic
+
+
+def _consume_provider_budget(provider_config: ResolvedProviderConfig) -> None:
+	now_monotonic = time.monotonic()
+	state = _provider_budget_state(provider_config)
+	if state.cooldown_until_monotonic > now_monotonic:
+		wait_seconds = state.cooldown_until_monotonic - now_monotonic
+		if wait_seconds > provider_config.rate_limit_max_wait_seconds:
+			raise RuntimeError(
+				"provider_rate_limited_cooldown:"
+				f"{provider_config.provider_name}:{provider_config.model_name}:{wait_seconds:.2f}"
+			)
+		time.sleep(wait_seconds)
+		now_monotonic = time.monotonic()
+
+	if provider_config.rate_limit_rpm is None or provider_config.rate_limit_burst is None:
+		return
+
+	state = _refill_provider_budget(provider_config, now_monotonic=now_monotonic)
+
+	if state.tokens >= 1.0:
+		state.tokens -= 1.0
+		return
+
+	replenish_rate = _provider_budget_refill_rate(provider_config)
+	if replenish_rate is None or replenish_rate <= 0.0:
+		raise RuntimeError(
+			"provider_rate_limited_budget:"
+			f"{provider_config.provider_name}:{provider_config.model_name}:0.00"
+		)
+	wait_seconds = max(0.0, (1.0 - state.tokens) / replenish_rate)
+	if wait_seconds > provider_config.rate_limit_max_wait_seconds:
+		raise RuntimeError(
+			"provider_rate_limited_budget:"
+			f"{provider_config.provider_name}:{provider_config.model_name}:{wait_seconds:.2f}"
+		)
+	time.sleep(wait_seconds)
+	now_monotonic = time.monotonic()
+	state = _refill_provider_budget(provider_config, now_monotonic=now_monotonic)
+	if state.tokens < 1.0:
+		raise RuntimeError(
+			"provider_rate_limited_budget:"
+			f"{provider_config.provider_name}:{provider_config.model_name}:{wait_seconds:.2f}"
+		)
+	state.tokens -= 1.0
+
+
+def _send_json_request_with_resilience(
+	provider_config: ResolvedProviderConfig,
+	request_transport: Transport,
+	*,
+	method: str,
+	url: str,
+	headers: Mapping[str, str],
+	payload: dict[str, Any],
+) -> dict[str, Any]:
+	circuit_open_message = _provider_circuit_open_message(provider_config)
+	if circuit_open_message is not None:
+		raise RuntimeError(circuit_open_message)
+
+	retry_attempt = 0
+	while True:
+		try:
+			_consume_provider_budget(provider_config)
+			response_payload = request_transport(
+				method,
+				url,
+				headers,
+				payload,
+				provider_config.timeout_seconds,
+			)
+			_reset_provider_circuit(provider_config)
+			return response_payload
+		except RuntimeError as exc:
+			error_text = str(exc)
+			if error_text.startswith("provider_rate_limited"):
+				raise
+			retryable_category, max_retries = _retryable_provider_error_policy(error_text)
+			if retryable_category is None:
+				_reset_provider_circuit(provider_config)
+				raise
+			retry_after_seconds = _retry_after_seconds_from_error(error_text)
+			if retryable_category == "rate_limited" and retry_after_seconds is not None:
+				_apply_provider_cooldown(
+					provider_config,
+					retry_after_seconds=retry_after_seconds,
+				)
+			if retry_attempt >= max_retries:
+				_record_retryable_provider_failure(provider_config, error_text=error_text)
+				if retryable_category == "rate_limited":
+					raise RuntimeError(
+						"provider_rate_limited:"
+						f"{provider_config.provider_name}:{provider_config.model_name}:{retry_after_seconds or 0.0:.2f}"
+					)
+				raise
+			retry_attempt += 1
+			if retryable_category == "rate_limited" and retry_after_seconds is not None:
+				if retry_after_seconds > provider_config.rate_limit_max_wait_seconds:
+					_record_retryable_provider_failure(provider_config, error_text=error_text)
+					raise RuntimeError(
+						"provider_rate_limited:"
+						f"{provider_config.provider_name}:{provider_config.model_name}:{retry_after_seconds:.2f}"
+					)
+				time.sleep(retry_after_seconds)
+				continue
+			time.sleep(_provider_retry_delay_seconds(retry_attempt))
 
 
 def _schema_guard_prompt(system_prompt: str, response_schema: type[ModelT]) -> str:
@@ -123,13 +450,34 @@ def resolve_provider_config(
 		if override_base_url:
 			base_url = override_base_url
 
+	rate_limit_rpm = _parse_positive_int(resolved_environ.get(LLM_RATE_LIMIT_RPM_ENV))
+	rate_limit_burst = _parse_positive_int(resolved_environ.get(LLM_RATE_LIMIT_BURST_ENV))
+	rate_limit_max_wait_seconds = _parse_non_negative_float(
+		resolved_environ.get(LLM_RATE_LIMIT_MAX_WAIT_SECONDS_ENV)
+	)
+	if rate_limit_rpm is not None and rate_limit_burst is None:
+		rate_limit_burst = min(rate_limit_rpm, DEFAULT_RATE_LIMIT_BURST_CAP)
+	if rate_limit_max_wait_seconds is None:
+		rate_limit_max_wait_seconds = DEFAULT_RATE_LIMIT_MAX_WAIT_SECONDS
+
 	return ResolvedProviderConfig(
 		provider_name=resolved_provider,
 		model_name=model_name,
 		api_key=api_key,
 		api_key_env=settings.api_key_env,
 		base_url=base_url.rstrip("/"),
+		rate_limit_rpm=rate_limit_rpm,
+		rate_limit_burst=rate_limit_burst,
+		rate_limit_max_wait_seconds=rate_limit_max_wait_seconds,
 	)
+
+
+def _runtime_failure_reason(error_text: str) -> str:
+	if error_text.startswith("provider_circuit_open:"):
+		return "provider_circuit_open"
+	if error_text.startswith("provider_rate_limited"):
+		return "rate_limited"
+	return "provider_error"
 
 
 def llm_available(provider_name: str | None = None, *, environ: Mapping[str, str] | None = None) -> bool:
@@ -347,22 +695,24 @@ def call_structured_llm(
 		try:
 			if provider_config.provider_name == "openai":
 				url, headers, payload = _openai_request_parts(provider_config, llm_request, response_schema)
-				response_payload = request_transport(
-					"POST",
-					url,
-					headers,
-					payload,
-					provider_config.timeout_seconds,
+				response_payload = _send_json_request_with_resilience(
+					provider_config,
+					request_transport,
+					method="POST",
+					url=url,
+					headers=headers,
+					payload=payload,
 				)
 				last_raw_text = _extract_openai_text(response_payload)
 			else:
 				url, headers, payload = _gemini_request_parts(provider_config, llm_request, response_schema)
-				response_payload = request_transport(
-					"POST",
-					url,
-					headers,
-					payload,
-					provider_config.timeout_seconds,
+				response_payload = _send_json_request_with_resilience(
+					provider_config,
+					request_transport,
+					method="POST",
+					url=url,
+					headers=headers,
+					payload=payload,
 				)
 				last_raw_text = _extract_gemini_text(response_payload)
 
@@ -386,12 +736,14 @@ def call_structured_llm(
 				)
 			continue
 		except RuntimeError as exc:
+			error_text = str(exc)
+			failure_reason = _runtime_failure_reason(error_text)
 			return LLMCallResult(
 				value=None,
 				provider=provider_config.provider_name,
 				model=provider_config.model_name,
-				failure_reason="provider_error",
-				raw_text=str(exc),
+				failure_reason=failure_reason,
+				raw_text=error_text,
 				attempts=attempt,
 			)
 

@@ -10,6 +10,7 @@ from collections import Counter
 from datetime import datetime, timezone
 from typing import Any, Final, Mapping
 
+from ai_validation import resolve_should_escalate_reason, triage_budget_reasons, validate_customer_text
 from config import AI_MODE_ENV, AI_TRACE_PATH, DEFAULT_AI_MODE
 from llm import Transport, call_structured_llm
 from response_builder import build_escalation_result, build_invalid_result, build_replied_justification, build_reply_result
@@ -42,30 +43,18 @@ AI_EVIDENCE_LIMIT: Final[int] = 3
 AI_SYNTHESIS_MAX_OUTPUT_TOKENS: Final[int] = 260
 AI_TRIAGE_MAX_OUTPUT_TOKENS: Final[int] = 320
 AI_REVIEW_MAX_OUTPUT_TOKENS: Final[int] = 220
-FORBIDDEN_OUTPUT_MARKERS: Final[tuple[str, ...]] = (
-	"source_path",
-	"rank=",
-	"score=",
-	"resolved_company",
-	"support guidance",
-	"retrieved evidence",
-	"fallback_response",
-	"fallback_justification",
-	"title:",
-	"heading:",
-	"topic:",
-	"content:",
-)
 SYNTHESIS_SYSTEM_PROMPT: Final[str] = (
 	"You rewrite deterministic support responses using only the supplied local evidence. "
 	"Keep the ticket status, request type, and product area fixed. "
 	"Do not invent policies, URLs, account actions, or facts not present in the evidence. "
+	"If you reuse fallback wording, rewrite any internal support-note phrasing into plain customer-facing language. "
 	"Do not mention source paths, scores, evidence labels, or internal reasoning."
 )
 TRIAGE_SYSTEM_PROMPT: Final[str] = (
 	"You are a bounded support-triage reasoner. Use only the supplied ticket fields, allowed label values, "
 	"candidate product areas, deterministic fallback output, and local retrieved evidence. "
 	"Do not use outside knowledge. If the evidence is weak or conflicting, escalate or return the fallback. "
+	"If you reuse fallback wording, rewrite any internal support-note phrasing into plain customer-facing language. "
 	"Do not mention source paths, scores, evidence labels, or internal reasoning in the response or justification."
 )
 REVIEW_SYSTEM_PROMPT: Final[str] = (
@@ -394,32 +383,6 @@ def _candidate_product_areas(
 	return tuple(candidates)
 
 
-def _contains_forbidden_output_content(text: str, *, retrieved_chunks: tuple[RetrievedChunk, ...]) -> bool:
-	lowered_text = text.lower()
-	if any(marker in lowered_text for marker in FORBIDDEN_OUTPUT_MARKERS):
-		return True
-	if "http://" in lowered_text or "https://" in lowered_text:
-		return True
-	for chunk in retrieved_chunks[:AI_EVIDENCE_LIMIT]:
-		if chunk.source_path and chunk.source_path.lower() in lowered_text:
-			return True
-	return False
-
-
-def _validate_customer_text(
-	label: str,
-	text: str,
-	*,
-	retrieved_chunks: tuple[RetrievedChunk, ...],
-) -> str | None:
-	normalized_text = _normalize_output_text(text)
-	if not normalized_text:
-		return f"{label}_blank"
-	if _contains_forbidden_output_content(normalized_text, retrieved_chunks=retrieved_chunks):
-		return f"{label}_contains_internal_or_unsupported_content"
-	return None
-
-
 def _build_synthesis_prompt(
 	*,
 	normalized_ticket: NormalizedTicket,
@@ -456,6 +419,11 @@ def _build_triage_prompt(
 	company_text = resolved_company.value if resolved_company is not None else "unresolved"
 	subject_text = normalized_ticket.normalized_subject or "(none)"
 	evidence_text = _build_evidence_prompt(retrieved_chunks)
+	fallback_should_escalate_reason = (
+		deterministic_result.justification
+		if deterministic_result.status is TicketStatus.ESCALATED
+		else "(none)"
+	)
 	status_values = ", ".join(status.value for status in TicketStatus)
 	request_type_values = ", ".join(request_type.value for request_type in RequestType)
 	product_area_values = ", ".join(candidate_product_areas)
@@ -470,8 +438,11 @@ def _build_triage_prompt(
 		f"fallback_request_type: {deterministic_result.request_type.value}\n"
 		f"fallback_product_area: {deterministic_result.product_area}\n"
 		f"fallback_response: {deterministic_result.response}\n"
-		f"fallback_justification: {deterministic_result.justification}\n\n"
-		"Use only the local evidence below. If support is weak or conflicting, either escalate with a concise should_escalate_reason or return the fallback.\n\n"
+		f"fallback_justification: {deterministic_result.justification}\n"
+		f"fallback_should_escalate_reason: {fallback_should_escalate_reason}\n\n"
+		"Use only the local evidence below. If support is weak or conflicting, either escalate with a concise should_escalate_reason or return the fallback. "
+		"If you choose status=escalated, you must provide should_escalate_reason. If the fallback is already escalated and you agree with it, reuse or rewrite fallback_should_escalate_reason concisely. "
+		"If you reuse fallback wording, rewrite any internal support-note phrasing into plain customer-facing language.\n\n"
 		f"{evidence_text}"
 	)
 
@@ -621,7 +592,7 @@ def _apply_synthesis_mode(
 		trace["outcome"] = f"synthesis_rejected_{llm_result.failure_reason or 'llm_unavailable'}"
 		return deterministic_result, trace
 
-	response_reason = _validate_customer_text(
+	response_reason = validate_customer_text(
 		"response",
 		llm_result.value.response,
 		retrieved_chunks=retrieved_chunks,
@@ -629,7 +600,7 @@ def _apply_synthesis_mode(
 	if response_reason is not None:
 		trace["outcome"] = f"synthesis_rejected_{response_reason}"
 		return deterministic_result, trace
-	justification_reason = _validate_customer_text(
+	justification_reason = validate_customer_text(
 		"justification",
 		llm_result.value.justification,
 		retrieved_chunks=retrieved_chunks,
@@ -671,6 +642,21 @@ def _apply_triage_mode(
 		resolved_company=resolved_company,
 		deterministic_product_area=deterministic_result.product_area,
 	)
+	budget_reasons = triage_budget_reasons(
+		resolved_company=resolved_company,
+		deterministic_result=deterministic_result,
+		retrieved_chunks=retrieved_chunks,
+		candidate_product_areas=candidate_product_areas,
+	)
+	if not budget_reasons:
+		return (
+			deterministic_result,
+			{
+				"outcome": "triage_skipped_low_value",
+				"llm_called": False,
+				"candidate_product_areas": list(candidate_product_areas),
+			},
+		)
 	llm_result = call_structured_llm(
 		response_schema=_TriagedOutput,
 		system_prompt=TRIAGE_SYSTEM_PROMPT,
@@ -691,6 +677,7 @@ def _apply_triage_mode(
 		"model": llm_result.model,
 		"failure_reason": llm_result.failure_reason,
 		"candidate_product_areas": list(candidate_product_areas),
+		"details": {"budget_reasons": list(budget_reasons)},
 	}
 	if not llm_result.succeeded or llm_result.value is None:
 		trace["outcome"] = f"triage_rejected_{llm_result.failure_reason or 'llm_unavailable'}"
@@ -705,7 +692,7 @@ def _apply_triage_mode(
 		trace["outcome"] = "triage_rejected_product_area_outside_candidates"
 		return deterministic_result, trace
 
-	response_reason = _validate_customer_text(
+	response_reason = validate_customer_text(
 		"response",
 		llm_result.value.response,
 		retrieved_chunks=retrieved_chunks,
@@ -713,7 +700,7 @@ def _apply_triage_mode(
 	if response_reason is not None:
 		trace["outcome"] = f"triage_rejected_{response_reason}"
 		return deterministic_result, trace
-	justification_reason = _validate_customer_text(
+	justification_reason = validate_customer_text(
 		"justification",
 		llm_result.value.justification,
 		retrieved_chunks=retrieved_chunks,
@@ -722,19 +709,37 @@ def _apply_triage_mode(
 		trace["outcome"] = f"triage_rejected_{justification_reason}"
 		return deterministic_result, trace
 
+	resolved_should_escalate_reason = resolve_should_escalate_reason(
+		proposed_status=llm_result.value.status,
+		proposed_reason=llm_result.value.should_escalate_reason,
+		deterministic_result=deterministic_result,
+	)
+	if (
+		llm_result.value.status is TicketStatus.ESCALATED
+		and not _normalize_output_text(llm_result.value.should_escalate_reason or "")
+		and resolved_should_escalate_reason is not None
+	):
+		trace.setdefault("details", {})["repaired_should_escalate_reason"] = True
+
 	if llm_result.value.evidence_support is EvidenceSupport.WEAK:
 		if llm_result.value.status is not TicketStatus.ESCALATED:
 			trace["outcome"] = "triage_rejected_weak_replied_evidence"
 			return deterministic_result, trace
-		if not _normalize_output_text(llm_result.value.should_escalate_reason or ""):
+		if resolved_should_escalate_reason is None:
 			trace["outcome"] = "triage_rejected_missing_should_escalate_reason"
 			return deterministic_result, trace
 
-	if llm_result.value.status is TicketStatus.ESCALATED and not _normalize_output_text(
-		llm_result.value.should_escalate_reason or ""
-	):
+	if llm_result.value.status is TicketStatus.ESCALATED and resolved_should_escalate_reason is None:
 		trace["outcome"] = "triage_rejected_missing_should_escalate_reason"
 		return deterministic_result, trace
+
+	accepted_justification = _normalize_output_text(llm_result.value.justification)
+	if (
+		llm_result.value.status is deterministic_result.status
+		and llm_result.value.request_type is deterministic_result.request_type
+		and canonical_product_area == deterministic_result.product_area
+	):
+		accepted_justification = deterministic_result.justification
 
 	trace["outcome"] = "triage_accepted"
 	return (
@@ -742,7 +747,7 @@ def _apply_triage_mode(
 			status=llm_result.value.status,
 			product_area=canonical_product_area,
 			response=_normalize_output_text(llm_result.value.response),
-			justification=_normalize_output_text(llm_result.value.justification),
+			justification=accepted_justification,
 			request_type=llm_result.value.request_type,
 		),
 		trace,
