@@ -49,6 +49,21 @@ GENERIC_PRODUCT_AREAS: Final[frozenset[str]] = frozenset(
 		"additional_resources",
 	}
 )
+SEMANTIC_CONCEPT_SYNONYMS: Final[dict[str, frozenset[str]]] = {
+	"account": frozenset({"account", "accounts", "console", "organization", "org"}),
+	"bedrock": frozenset({"amazon", "aws", "bedrock", "region", "regions"}),
+	"compatibility": frozenset(
+		{"browser", "compatibility", "compatible", "connectivity", "network", "system", "zoom"}
+	),
+	"conversation": frozenset({"chat", "chats", "conversation", "conversations", "thread", "threads"}),
+	"delete": frozenset({"clear", "close", "delete", "erase", "remove", "wipe"}),
+	"privacy": frozenset({"confidential", "private", "privacy", "sensitive"}),
+	"security_report": frozenset(
+		{"bounty", "disclosure", "jailbreak", "report", "reporting", "security", "vulnerability", "vulnerabilities"}
+	),
+	"share": frozenset({"public", "share", "shared", "sharing", "unshare", "unsharing", "visibility"}),
+	"team": frozenset({"admin", "employee", "employees", "member", "members", "team", "teams", "user", "users"}),
+}
 INVALID_REPLY_TEXT: Final[str] = "I am sorry, this is out of scope from my capabilities."
 
 
@@ -318,9 +333,54 @@ def _chunk_metadata_tokens(chunk: RetrievedChunk) -> frozenset[str]:
 	return frozenset(TOKEN_PATTERN.findall(" ".join(metadata_parts).lower()))
 
 
+def _semantic_concepts(tokens: frozenset[str]) -> frozenset[str]:
+	concepts = {
+		concept
+		for concept, synonyms in SEMANTIC_CONCEPT_SYNONYMS.items()
+		if tokens & synonyms
+	}
+	return frozenset(concepts)
+
+
+def _semantic_concept_score(
+	*,
+	query_concepts: frozenset[str],
+	chunk_concepts: frozenset[str],
+) -> float:
+	if not query_concepts or not chunk_concepts:
+		return 0.0
+
+	shared_concepts = query_concepts & chunk_concepts
+	score = len(shared_concepts) * 2.5
+
+	if {"conversation", "delete"} <= shared_concepts:
+		score += 6.0
+	if {"account", "delete"} <= shared_concepts:
+		score += 5.0
+	if {"team", "delete"} <= shared_concepts:
+		score += 4.0
+	if {"bedrock"} <= shared_concepts:
+		score += 3.0
+	if {"compatibility"} <= shared_concepts:
+		score += 3.0
+	if {"security_report"} <= shared_concepts:
+		score += 3.0
+
+	if "delete" in query_concepts and "share" in chunk_concepts and "delete" not in chunk_concepts:
+		score -= 5.0
+	if "conversation" in query_concepts and "account" in chunk_concepts and "conversation" not in chunk_concepts:
+		score -= 2.0
+	if "account" in query_concepts and "conversation" in chunk_concepts and "account" not in chunk_concepts:
+		score -= 2.0
+
+	return score
+
+
 def _chunk_preference_score(chunk: RetrievedChunk, query_tokens: frozenset[str]) -> float:
 	score = chunk.score or 0.0
 	metadata_tokens = _chunk_metadata_tokens(chunk)
+	query_concepts = _semantic_concepts(query_tokens)
+	chunk_concepts = _semantic_concepts(metadata_tokens)
 	path_text = chunk.source_path.lower()
 	heading_text = (chunk.heading or "").strip().lower()
 	title_text = chunk.title.strip().lower()
@@ -328,6 +388,7 @@ def _chunk_preference_score(chunk: RetrievedChunk, query_tokens: frozenset[str])
 	if chunk.product_area_hint and chunk.product_area_hint not in GENERIC_PRODUCT_AREAS:
 		score += 2.0
 	score += len(query_tokens & metadata_tokens) * 1.15
+	score += _semantic_concept_score(query_concepts=query_concepts, chunk_concepts=chunk_concepts)
 	if heading_text in NON_ACTIONABLE_HEADING_TOKENS or title_text in NON_ACTIONABLE_HEADING_TOKENS:
 		score -= 4.0
 
