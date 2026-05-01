@@ -7,7 +7,7 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Final, Mapping
 
-from llm import Transport, call_structured_llm, llm_available
+from llm import Transport, call_structured_llm
 from retriever import build_query_text, retrieve_chunks
 from safety import assess_ticket_safety, build_escalation_response, evaluate_retrieval_safety
 from schemas import (
@@ -58,6 +58,7 @@ class _ReplyBuildResult:
 	synthesized_by_llm: bool = False
 	llm_provider: str | None = None
 	llm_model: str | None = None
+	fallback_reason: str | None = None
 
 
 class _SynthesizedReply(SupportModel):
@@ -512,6 +513,42 @@ def _normalize_reply_text(text: str) -> str:
 	return f"{truncated}..." if truncated else collapsed[:MAX_REPLY_CHARS]
 
 
+def _is_supported_synthesized_reply(
+	response_text: str,
+	*,
+	top_chunk: RetrievedChunk,
+	retrieved_chunks: tuple[RetrievedChunk, ...],
+) -> bool:
+	lowered_response = response_text.lower()
+	if not lowered_response:
+		return False
+	for forbidden_marker in (
+		"source_path",
+		"retrieved evidence",
+		"evidence 1",
+		"evidence 2",
+		"fallback_response",
+		"title:",
+		"heading:",
+	):
+		if forbidden_marker in lowered_response:
+			return False
+
+	metadata_leaks = {
+		top_chunk.source_path.lower(),
+		top_chunk.title.lower(),
+	}
+	if top_chunk.heading:
+		metadata_leaks.add(top_chunk.heading.lower())
+	for chunk in retrieved_chunks[:LLM_REPLY_EVIDENCE_LIMIT]:
+		metadata_leaks.add(chunk.source_path.lower())
+	for metadata_text in metadata_leaks:
+		if metadata_text and metadata_text in lowered_response:
+			return False
+
+	return True
+
+
 def _build_llm_evidence_block(chunk: RetrievedChunk, *, index: int) -> str:
 	heading_text = f"\nheading: {chunk.heading}" if chunk.heading else ""
 	return (
@@ -561,11 +598,9 @@ def _build_reply_result(
 ) -> _ReplyBuildResult:
 	deterministic_response = _build_replied_response(top_chunk)
 	if request_type is not RequestType.PRODUCT_ISSUE:
-		return _ReplyBuildResult(response=deterministic_response)
+		return _ReplyBuildResult(response=deterministic_response, fallback_reason="request_type_not_eligible")
 	if product_area in GENERIC_PRODUCT_AREAS:
-		return _ReplyBuildResult(response=deterministic_response)
-	if not llm_available(environ=llm_environ):
-		return _ReplyBuildResult(response=deterministic_response)
+		return _ReplyBuildResult(response=deterministic_response, fallback_reason="generic_product_area")
 
 	llm_result = call_structured_llm(
 		response_schema=_SynthesizedReply,
@@ -582,11 +617,26 @@ def _build_reply_result(
 		transport=llm_transport,
 	)
 	if not llm_result.succeeded or llm_result.value is None:
-		return _ReplyBuildResult(response=deterministic_response)
+		return _ReplyBuildResult(
+			response=deterministic_response,
+			fallback_reason=llm_result.failure_reason or "llm_unavailable",
+		)
 
 	synthesized_response = _normalize_reply_text(llm_result.value.response)
 	if not synthesized_response:
-		return _ReplyBuildResult(response=deterministic_response)
+		return _ReplyBuildResult(
+			response=deterministic_response,
+			fallback_reason="unsupported_synthesized_response",
+		)
+	if not _is_supported_synthesized_reply(
+		synthesized_response,
+		top_chunk=top_chunk,
+		retrieved_chunks=retrieved_chunks,
+	):
+		return _ReplyBuildResult(
+			response=deterministic_response,
+			fallback_reason="unsupported_synthesized_response",
+		)
 
 	return _ReplyBuildResult(
 		response=synthesized_response,
@@ -612,7 +662,12 @@ def _build_replied_justification(
 		f"resolved_company={company_text}; product_area={product_area}."
 	)
 	if not reply_result.synthesized_by_llm:
-		return base
+		if reply_result.fallback_reason is None:
+			return base
+		return (
+			f"{base} Response wording fell back to the deterministic reply because "
+			f"optional synthesis was not used ({reply_result.fallback_reason})."
+		)
 	provider_text = "/".join(
 		part for part in (reply_result.llm_provider, reply_result.llm_model) if part
 	) or "configured_provider"
