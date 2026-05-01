@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import re
 from collections import Counter
-from typing import Final
+from dataclasses import dataclass
+from typing import Final, Mapping
 
+from llm import Transport, call_structured_llm, llm_available
 from retriever import build_query_text, retrieve_chunks
 from safety import assess_ticket_safety, build_escalation_response, evaluate_retrieval_safety
 from schemas import (
@@ -17,6 +19,7 @@ from schemas import (
 	RequestType,
 	RetrievedChunk,
 	SafetyDecision,
+	SupportModel,
 	TicketStatus,
 )
 from taxonomy import map_evidence_to_product_area, validate_product_area
@@ -27,6 +30,12 @@ TOKEN_PATTERN: Final[re.Pattern[str]] = re.compile(r"[a-z0-9]+")
 RETRIEVAL_TOP_K: Final[int] = 8
 MAX_REPLY_LINES: Final[int] = 3
 MAX_REPLY_CHARS: Final[int] = 480
+LLM_REPLY_EVIDENCE_LIMIT: Final[int] = 2
+LLM_REPLY_MAX_OUTPUT_TOKENS: Final[int] = 220
+LLM_REPLY_SYSTEM_PROMPT: Final[str] = (
+	"You write concise customer-support replies grounded strictly in the supplied help-center evidence. "
+	"Do not invent steps, policies, URLs, or account-specific actions. Keep the reply short, direct, and useful."
+)
 NON_ACTIONABLE_HEADING_TOKENS: Final[frozenset[str]] = frozenset(
 	{
 		"related articles",
@@ -41,6 +50,20 @@ GENERIC_PRODUCT_AREAS: Final[frozenset[str]] = frozenset(
 	}
 )
 INVALID_REPLY_TEXT: Final[str] = "I am sorry, this is out of scope from my capabilities."
+
+
+@dataclass(frozen=True)
+class _ReplyBuildResult:
+	response: str
+	synthesized_by_llm: bool = False
+	llm_provider: str | None = None
+	llm_model: str | None = None
+
+
+class _SynthesizedReply(SupportModel):
+	response: str
+
+
 QUERY_EXPANSION_RULES: Final[tuple[tuple[frozenset[str], tuple[str, ...]], ...]] = (
 	(frozenset({"active", "test"}), ("expiration", "expiry", "expire")),
 	(frozenset({"extra", "time"}), ("accommodation", "reinvite")),
@@ -479,19 +502,123 @@ def _build_replied_response(chunk: RetrievedChunk) -> str:
 	return f"The most relevant support guidance I found is in {label}."
 
 
+def _normalize_reply_text(text: str) -> str:
+	collapsed = WHITESPACE_PATTERN.sub(" ", text.strip())
+	if not collapsed:
+		return ""
+	if len(collapsed) <= MAX_REPLY_CHARS:
+		return collapsed
+	truncated = collapsed[:MAX_REPLY_CHARS].rsplit(" ", 1)[0].rstrip(" ,;:")
+	return f"{truncated}..." if truncated else collapsed[:MAX_REPLY_CHARS]
+
+
+def _build_llm_evidence_block(chunk: RetrievedChunk, *, index: int) -> str:
+	heading_text = f"\nheading: {chunk.heading}" if chunk.heading else ""
+	return (
+		f"Evidence {index}:\n"
+		f"title: {chunk.title}"
+		f"{heading_text}\n"
+		f"source_path: {chunk.source_path}\n"
+		f"excerpt: {_build_chunk_excerpt(chunk)}"
+	)
+
+
+def _build_reply_synthesis_prompt(
+	*,
+	normalized_ticket: NormalizedTicket,
+	resolved_company: Company,
+	product_area: str,
+	deterministic_response: str,
+	retrieved_chunks: tuple[RetrievedChunk, ...],
+) -> str:
+	subject_text = normalized_ticket.normalized_subject or "(none)"
+	evidence_text = "\n\n".join(
+		_build_llm_evidence_block(chunk, index=index)
+		for index, chunk in enumerate(retrieved_chunks[:LLM_REPLY_EVIDENCE_LIMIT], start=1)
+	)
+	return (
+		f"company: {resolved_company.value}\n"
+		f"product_area: {product_area}\n"
+		f"subject: {subject_text}\n"
+		f"issue: {normalized_ticket.normalized_issue}\n"
+		f"fallback_response: {deterministic_response}\n\n"
+		"Use only the evidence below. If the evidence is insufficient or conflicting, return the fallback_response exactly. "
+		"Do not mention document titles, source paths, or that you used retrieved evidence.\n\n"
+		f"{evidence_text}"
+	)
+
+
+def _build_reply_result(
+	*,
+	normalized_ticket: NormalizedTicket,
+	resolved_company: Company,
+	request_type: RequestType,
+	product_area: str,
+	top_chunk: RetrievedChunk,
+	retrieved_chunks: tuple[RetrievedChunk, ...],
+	llm_environ: Mapping[str, str] | None = None,
+	llm_transport: Transport | None = None,
+) -> _ReplyBuildResult:
+	deterministic_response = _build_replied_response(top_chunk)
+	if request_type is not RequestType.PRODUCT_ISSUE:
+		return _ReplyBuildResult(response=deterministic_response)
+	if product_area in GENERIC_PRODUCT_AREAS:
+		return _ReplyBuildResult(response=deterministic_response)
+	if not llm_available(environ=llm_environ):
+		return _ReplyBuildResult(response=deterministic_response)
+
+	llm_result = call_structured_llm(
+		response_schema=_SynthesizedReply,
+		system_prompt=LLM_REPLY_SYSTEM_PROMPT,
+		user_prompt=_build_reply_synthesis_prompt(
+			normalized_ticket=normalized_ticket,
+			resolved_company=resolved_company,
+			product_area=product_area,
+			deterministic_response=deterministic_response,
+			retrieved_chunks=retrieved_chunks,
+		),
+		max_output_tokens=LLM_REPLY_MAX_OUTPUT_TOKENS,
+		environ=llm_environ,
+		transport=llm_transport,
+	)
+	if not llm_result.succeeded or llm_result.value is None:
+		return _ReplyBuildResult(response=deterministic_response)
+
+	synthesized_response = _normalize_reply_text(llm_result.value.response)
+	if not synthesized_response:
+		return _ReplyBuildResult(response=deterministic_response)
+
+	return _ReplyBuildResult(
+		response=synthesized_response,
+		synthesized_by_llm=True,
+		llm_provider=llm_result.provider,
+		llm_model=llm_result.model,
+	)
+
+
 def _build_replied_justification(
 	chunk: RetrievedChunk,
 	*,
 	product_area: str,
 	resolved_company: Company | None,
+	reply_result: _ReplyBuildResult,
 ) -> str:
 	heading_text = f", heading={chunk.heading!r}" if chunk.heading else ""
 	company_text = resolved_company.value if resolved_company is not None else "unresolved"
 	score_text = f"{(chunk.score or 0.0):.2f}"
-	return (
+	base = (
 		f"Replied from retrieved support evidence in {chunk.source_path} "
 		f"(title={chunk.title!r}{heading_text}, rank={chunk.rank}, score={score_text}); "
 		f"resolved_company={company_text}; product_area={product_area}."
+	)
+	if not reply_result.synthesized_by_llm:
+		return base
+	provider_text = "/".join(
+		part for part in (reply_result.llm_provider, reply_result.llm_model) if part
+	) or "configured_provider"
+	return (
+		f"{base} Response wording was synthesized via optional {provider_text} "
+		"using the retrieved evidence only while categorical fields remained deterministic."
 	)
 
 
@@ -584,7 +711,12 @@ def _build_invalid_result(*, explicit_company: Company | None) -> OutputRow:
 	)
 
 
-def process_ticket(ticket: InputTicket) -> dict[str, str]:
+def process_ticket(
+	ticket: InputTicket,
+	*,
+	llm_environ: Mapping[str, str] | None = None,
+	llm_transport: Transport | None = None,
+) -> dict[str, str]:
 	"""Run the deterministic ticket baseline without any provider dependency."""
 
 	normalized_ticket = normalize_ticket(ticket)
@@ -633,15 +765,26 @@ def process_ticket(ticket: InputTicket) -> dict[str, str]:
 
 	top_chunk = retrieved_chunks[0]
 	product_area = _product_area_from_chunk(top_chunk, resolved_company)
+	reply_result = _build_reply_result(
+		normalized_ticket=normalized_ticket,
+		resolved_company=resolved_company,
+		request_type=safety_decision.request_type,
+		product_area=product_area,
+		top_chunk=top_chunk,
+		retrieved_chunks=retrieved_chunks,
+		llm_environ=llm_environ,
+		llm_transport=llm_transport,
+	)
 
 	result = OutputRow(
 		status=TicketStatus.REPLIED,
 		product_area=product_area,
-		response=_build_replied_response(top_chunk),
+		response=reply_result.response,
 		justification=_build_replied_justification(
 			top_chunk,
 			product_area=product_area,
 			resolved_company=resolved_company,
+			reply_result=reply_result,
 		),
 		request_type=safety_decision.request_type,
 	)
