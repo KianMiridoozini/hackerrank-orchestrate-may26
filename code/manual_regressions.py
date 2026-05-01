@@ -166,7 +166,7 @@ def evaluate_manual_regressions(
 ) -> list[ManualRegressionResult]:
 	results: list[ManualRegressionResult] = []
 	for case in cases:
-		output = process_ticket(case.ticket, llm_environ={})
+		output = process_ticket(case.ticket)
 		failures: list[str] = []
 
 		if output.get("status") != case.expected_status:

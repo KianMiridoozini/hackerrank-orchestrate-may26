@@ -5,9 +5,8 @@ from __future__ import annotations
 import html
 import re
 from dataclasses import dataclass
-from typing import Final, Mapping, Sequence
+from typing import Final, Sequence
 
-from llm import Transport, call_structured_llm
 from retrieval_policy import is_generic_product_area
 from safety import build_escalation_response
 from schemas import (
@@ -18,7 +17,6 @@ from schemas import (
 	RequestType,
 	RetrievedChunk,
 	SafetyDecision,
-	SupportModel,
 	TicketStatus,
 )
 from taxonomy import default_product_area_for_company, map_retrieved_chunk_to_product_area, validate_product_area
@@ -31,12 +29,6 @@ MARKDOWN_IMAGE_PATTERN: Final[re.Pattern[str]] = re.compile(r"!\[[^\]]*\]\([^)]+
 PLACEHOLDER_PATTERN: Final[re.Pattern[str]] = re.compile(r"<[^>]+>")
 MAX_REPLY_CHARS: Final[int] = 480
 MAX_REPLY_SELECTION_LINES: Final[int] = 3
-LLM_REPLY_EVIDENCE_LIMIT: Final[int] = 2
-LLM_REPLY_MAX_OUTPUT_TOKENS: Final[int] = 220
-LLM_REPLY_SYSTEM_PROMPT: Final[str] = (
-	"You write concise customer-support replies grounded strictly in the supplied help-center evidence. "
-	"Do not invent steps, policies, URLs, or account-specific actions. Keep the reply short, direct, and useful."
-)
 INVALID_REPLY_TEXT: Final[str] = "I am sorry, this is out of scope from my capabilities."
 
 
@@ -48,10 +40,6 @@ class ReplyBuildResult:
 	llm_provider: str | None = None
 	llm_model: str | None = None
 	fallback_reason: str | None = None
-
-
-class _SynthesizedReply(SupportModel):
-	response: str
 
 
 def _ticket_query_text(normalized_ticket: NormalizedTicket) -> str:
@@ -163,77 +151,6 @@ def _normalize_reply_text(text: str) -> str:
 		return collapsed
 	truncated = collapsed[:MAX_REPLY_CHARS].rsplit(" ", 1)[0].rstrip(" ,;:")
 	return f"{truncated}..." if truncated else collapsed[:MAX_REPLY_CHARS]
-
-
-def _is_supported_synthesized_reply(
-	response_text: str,
-	*,
-	top_chunk: RetrievedChunk,
-	retrieved_chunks: tuple[RetrievedChunk, ...],
-) -> bool:
-	lowered_response = response_text.lower()
-	if not lowered_response:
-		return False
-	for forbidden_marker in (
-		"source_path",
-		"retrieved evidence",
-		"evidence 1",
-		"evidence 2",
-		"fallback_response",
-		"title:",
-		"heading:",
-	):
-		if forbidden_marker in lowered_response:
-			return False
-
-	metadata_leaks = {
-		top_chunk.source_path.lower(),
-		top_chunk.title.lower(),
-	}
-	if top_chunk.heading:
-		metadata_leaks.add(top_chunk.heading.lower())
-	for chunk in retrieved_chunks[:LLM_REPLY_EVIDENCE_LIMIT]:
-		metadata_leaks.add(chunk.source_path.lower())
-	for metadata_text in metadata_leaks:
-		if metadata_text and metadata_text in lowered_response:
-			return False
-
-	return True
-
-
-def _build_llm_evidence_block(chunk: RetrievedChunk, *, index: int) -> str:
-	summary_lines = _chunk_support_lines(chunk)[:MAX_REPLY_SELECTION_LINES]
-	summary_text = " ".join(summary_lines) if summary_lines else _friendly_evidence_label(chunk)
-	return (
-		f"Support guidance {index}:\n"
-		f"topic: {_friendly_evidence_label(chunk)}\n"
-		f"content: {_normalize_reply_text(summary_text)}"
-	)
-
-
-def _build_reply_synthesis_prompt(
-	*,
-	normalized_ticket: NormalizedTicket,
-	resolved_company: Company,
-	product_area: str,
-	deterministic_response: str,
-	retrieved_chunks: tuple[RetrievedChunk, ...],
-) -> str:
-	subject_text = normalized_ticket.normalized_subject or "(none)"
-	evidence_text = "\n\n".join(
-		_build_llm_evidence_block(chunk, index=index)
-		for index, chunk in enumerate(retrieved_chunks[:LLM_REPLY_EVIDENCE_LIMIT], start=1)
-	)
-	return (
-		f"company: {resolved_company.value}\n"
-		f"product_area: {product_area}\n"
-		f"subject: {subject_text}\n"
-		f"issue: {normalized_ticket.normalized_issue}\n"
-		f"fallback_response: {deterministic_response}\n\n"
-		"Use only the support guidance below. If the guidance is insufficient or conflicting, return the fallback_response exactly. "
-		"Do not mention article titles, file names, or that you used retrieved evidence.\n\n"
-		f"{evidence_text}"
-	)
 
 
 def _build_reschedule_reply(
@@ -717,72 +634,12 @@ def build_reply_result(
 	product_area: str,
 	top_chunk: RetrievedChunk,
 	retrieved_chunks: tuple[RetrievedChunk, ...],
-	llm_environ: Mapping[str, str] | None = None,
-	llm_transport: Transport | None = None,
 ) -> ReplyBuildResult:
 	deterministic_response, justification_note = _build_replied_response(
 		normalized_ticket=normalized_ticket,
 		retrieved_chunks=retrieved_chunks,
 	)
-	if request_type is not RequestType.PRODUCT_ISSUE:
-		return ReplyBuildResult(
-			response=deterministic_response,
-			justification_note=justification_note,
-			fallback_reason="request_type_not_eligible",
-		)
-	if is_generic_product_area(product_area):
-		return ReplyBuildResult(
-			response=deterministic_response,
-			justification_note=justification_note,
-			fallback_reason="generic_product_area",
-		)
-
-	llm_result = call_structured_llm(
-		response_schema=_SynthesizedReply,
-		system_prompt=LLM_REPLY_SYSTEM_PROMPT,
-		user_prompt=_build_reply_synthesis_prompt(
-			normalized_ticket=normalized_ticket,
-			resolved_company=resolved_company,
-			product_area=product_area,
-			deterministic_response=deterministic_response,
-			retrieved_chunks=retrieved_chunks,
-		),
-		max_output_tokens=LLM_REPLY_MAX_OUTPUT_TOKENS,
-		environ=llm_environ,
-		transport=llm_transport,
-	)
-	if not llm_result.succeeded or llm_result.value is None:
-		return ReplyBuildResult(
-			response=deterministic_response,
-			justification_note=justification_note,
-			fallback_reason=llm_result.failure_reason or "llm_unavailable",
-		)
-
-	synthesized_response = _normalize_reply_text(llm_result.value.response)
-	if not synthesized_response:
-		return ReplyBuildResult(
-			response=deterministic_response,
-			justification_note=justification_note,
-			fallback_reason="unsupported_synthesized_response",
-		)
-	if not _is_supported_synthesized_reply(
-		synthesized_response,
-		top_chunk=top_chunk,
-		retrieved_chunks=retrieved_chunks,
-	):
-		return ReplyBuildResult(
-			response=deterministic_response,
-			justification_note=justification_note,
-			fallback_reason="unsupported_synthesized_response",
-		)
-
-	return ReplyBuildResult(
-		response=synthesized_response,
-		justification_note=justification_note,
-		synthesized_by_llm=True,
-		llm_provider=llm_result.provider,
-		llm_model=llm_result.model,
-	)
+	return ReplyBuildResult(response=deterministic_response, justification_note=justification_note)
 
 
 def build_replied_justification(

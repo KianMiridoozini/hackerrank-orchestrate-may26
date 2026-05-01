@@ -1,32 +1,77 @@
-"""Ticket orchestration entrypoints for deterministic triage."""
+"""Ticket orchestration entrypoints for deterministic triage and bounded AI modes."""
 
 from __future__ import annotations
 
+import html
+import json
+import os
 import re
 from collections import Counter
-from typing import Final, Mapping
+from datetime import datetime, timezone
+from typing import Any, Final, Mapping
 
-from llm import Transport
+from config import AI_MODE_ENV, AI_TRACE_PATH, DEFAULT_AI_MODE
+from llm import Transport, call_structured_llm
 from response_builder import build_escalation_result, build_invalid_result, build_replied_justification, build_reply_result
 from retrieval_policy import expand_query_text, rerank_retrieved_chunks
 from retriever import build_query_text, retrieve_chunks
 from safety import assess_ticket_safety, evaluate_retrieval_safety
 from schemas import (
+	AIMode,
 	Company,
+	EvidenceSupport,
 	EscalationCategory,
 	InputTicket,
 	NormalizedTicket,
 	OutputRow,
 	RequestType,
+	RetrievedChunk,
 	SafetyDecision,
+	SupportModel,
 	TicketStatus,
 )
-from taxonomy import map_retrieved_chunk_to_product_area
+from taxonomy import default_product_area_for_company, get_product_area_taxonomy, map_retrieved_chunk_to_product_area, validate_product_area
 
 
 WHITESPACE_PATTERN: Final[re.Pattern[str]] = re.compile(r"\s+")
 TOKEN_PATTERN: Final[re.Pattern[str]] = re.compile(r"[a-z0-9]+")
+MARKDOWN_LINK_PATTERN: Final[re.Pattern[str]] = re.compile(r"\[([^\]]+)\]\([^)]+\)")
+MARKDOWN_IMAGE_PATTERN: Final[re.Pattern[str]] = re.compile(r"!\[[^\]]*\]\([^)]+\)")
 RETRIEVAL_TOP_K: Final[int] = 8
+AI_EVIDENCE_LIMIT: Final[int] = 3
+AI_SYNTHESIS_MAX_OUTPUT_TOKENS: Final[int] = 260
+AI_TRIAGE_MAX_OUTPUT_TOKENS: Final[int] = 320
+AI_REVIEW_MAX_OUTPUT_TOKENS: Final[int] = 220
+FORBIDDEN_OUTPUT_MARKERS: Final[tuple[str, ...]] = (
+	"source_path",
+	"rank=",
+	"score=",
+	"resolved_company",
+	"support guidance",
+	"retrieved evidence",
+	"fallback_response",
+	"fallback_justification",
+	"title:",
+	"heading:",
+	"topic:",
+	"content:",
+)
+SYNTHESIS_SYSTEM_PROMPT: Final[str] = (
+	"You rewrite deterministic support responses using only the supplied local evidence. "
+	"Keep the ticket status, request type, and product area fixed. "
+	"Do not invent policies, URLs, account actions, or facts not present in the evidence. "
+	"Do not mention source paths, scores, evidence labels, or internal reasoning."
+)
+TRIAGE_SYSTEM_PROMPT: Final[str] = (
+	"You are a bounded support-triage reasoner. Use only the supplied ticket fields, allowed label values, "
+	"candidate product areas, deterministic fallback output, and local retrieved evidence. "
+	"Do not use outside knowledge. If the evidence is weak or conflicting, escalate or return the fallback. "
+	"Do not mention source paths, scores, evidence labels, or internal reasoning in the response or justification."
+)
+REVIEW_SYSTEM_PROMPT: Final[str] = (
+	"You review a deterministic support-ticket output against supplied local evidence. "
+	"Do not rewrite the ticket output. Return only short warnings about grounding, safety, or formatting risks."
+)
 
 
 DOMAIN_KEYWORDS: Final[dict[Company, tuple[str, ...]]] = {
@@ -80,6 +125,27 @@ MIN_RETRIEVAL_MARGIN: Final[float] = 1.15
 MIN_SPECIFIC_QUERY_TOKENS: Final[int] = 2
 
 
+class _SynthesizedReply(SupportModel):
+	response: str
+	justification: str
+	evidence_support: EvidenceSupport
+
+
+class _TriagedOutput(SupportModel):
+	status: TicketStatus
+	request_type: RequestType
+	product_area: str
+	response: str
+	justification: str
+	evidence_support: EvidenceSupport
+	should_escalate_reason: str | None = None
+
+
+class _ReviewedOutput(SupportModel):
+	warnings: tuple[str, ...] = ()
+	summary: str | None = None
+
+
 def _normalize_text(value: str | None) -> str | None:
 	if value is None:
 		return None
@@ -93,6 +159,15 @@ def _trusted_company(company: Company | None) -> Company | None:
 	if company and company is not Company.NONE:
 		return company
 	return None
+
+
+def _resolve_ai_mode(environ: Mapping[str, str] | None = None) -> AIMode:
+	resolved_environ = os.environ if environ is None else environ
+	configured_value = (resolved_environ.get(AI_MODE_ENV) or DEFAULT_AI_MODE).strip().lower()
+	try:
+		return AIMode(configured_value)
+	except ValueError:
+		return AIMode.OFF
 
 
 def _has_specific_query_terms(query_text: str) -> bool:
@@ -237,6 +312,527 @@ def _weak_evidence_decision(
 	)
 
 
+def _normalize_output_text(value: str) -> str:
+	return WHITESPACE_PATTERN.sub(" ", value.strip())
+
+
+def _clean_evidence_line(raw_line: str) -> str:
+	line = html.unescape(raw_line.strip())
+	line = MARKDOWN_IMAGE_PATTERN.sub(" ", line)
+	line = MARKDOWN_LINK_PATTERN.sub(r"\1", line)
+	line = line.replace("```", " ").replace("\u00a0", " ")
+	line = line.lstrip("#>*- ").strip()
+	return WHITESPACE_PATTERN.sub(" ", line).strip()
+
+
+def _evidence_label(chunk: RetrievedChunk) -> str:
+	if chunk.heading:
+		label = chunk.heading.split("/")[-1].strip(" *")
+		if label:
+			return label
+	return chunk.title.strip()
+
+
+def _chunk_support_lines(chunk: RetrievedChunk) -> list[str]:
+	labels = {chunk.title.lower()}
+	if chunk.heading:
+		labels.add(chunk.heading.lower())
+	selected_lines: list[str] = []
+	seen_lines: set[str] = set()
+	for raw_line in chunk.text.splitlines():
+		line = _clean_evidence_line(raw_line)
+		if not line:
+			continue
+		lowered_line = line.lower()
+		if lowered_line in labels:
+			continue
+		if lowered_line.startswith("last updated") or lowered_line.startswith("related articles"):
+			continue
+		if line in seen_lines:
+			continue
+		selected_lines.append(line)
+		seen_lines.add(line)
+	return selected_lines
+
+
+def _build_evidence_prompt(retrieved_chunks: tuple[RetrievedChunk, ...]) -> str:
+	blocks: list[str] = []
+	for index, chunk in enumerate(retrieved_chunks[:AI_EVIDENCE_LIMIT], start=1):
+		summary_lines = _chunk_support_lines(chunk)[:3]
+		summary_text = " ".join(summary_lines) if summary_lines else _evidence_label(chunk)
+		blocks.append(
+			f"Evidence {index}:\n"
+			f"topic: {_evidence_label(chunk)}\n"
+			f"content: {_normalize_output_text(summary_text)}"
+		)
+	return "\n\n".join(blocks) if blocks else "No retrieved evidence was available."
+
+
+def _candidate_product_areas(
+	*,
+	retrieved_chunks: tuple[RetrievedChunk, ...],
+	resolved_company: Company | None,
+	deterministic_product_area: str,
+) -> tuple[str, ...]:
+	taxonomy = get_product_area_taxonomy()
+	candidates: list[str] = []
+
+	def add_candidate(value: str) -> None:
+		try:
+			canonical = validate_product_area(value, taxonomy)
+		except ValueError:
+			return
+		if canonical not in candidates:
+			candidates.append(canonical)
+
+	for chunk in retrieved_chunks[:AI_EVIDENCE_LIMIT]:
+		add_candidate(map_retrieved_chunk_to_product_area(chunk, resolved_company))
+	add_candidate(deterministic_product_area)
+	add_candidate(default_product_area_for_company(resolved_company))
+	if not candidates:
+		add_candidate("general_support")
+	return tuple(candidates)
+
+
+def _contains_forbidden_output_content(text: str, *, retrieved_chunks: tuple[RetrievedChunk, ...]) -> bool:
+	lowered_text = text.lower()
+	if any(marker in lowered_text for marker in FORBIDDEN_OUTPUT_MARKERS):
+		return True
+	if "http://" in lowered_text or "https://" in lowered_text:
+		return True
+	for chunk in retrieved_chunks[:AI_EVIDENCE_LIMIT]:
+		if chunk.source_path and chunk.source_path.lower() in lowered_text:
+			return True
+	return False
+
+
+def _validate_customer_text(
+	label: str,
+	text: str,
+	*,
+	retrieved_chunks: tuple[RetrievedChunk, ...],
+) -> str | None:
+	normalized_text = _normalize_output_text(text)
+	if not normalized_text:
+		return f"{label}_blank"
+	if _contains_forbidden_output_content(normalized_text, retrieved_chunks=retrieved_chunks):
+		return f"{label}_contains_internal_or_unsupported_content"
+	return None
+
+
+def _build_synthesis_prompt(
+	*,
+	normalized_ticket: NormalizedTicket,
+	resolved_company: Company | None,
+	deterministic_result: OutputRow,
+	retrieved_chunks: tuple[RetrievedChunk, ...],
+) -> str:
+	company_text = resolved_company.value if resolved_company is not None else "unresolved"
+	subject_text = normalized_ticket.normalized_subject or "(none)"
+	evidence_text = _build_evidence_prompt(retrieved_chunks)
+	return (
+		f"company: {company_text}\n"
+		f"status: {deterministic_result.status.value}\n"
+		f"request_type: {deterministic_result.request_type.value}\n"
+		f"product_area: {deterministic_result.product_area}\n"
+		f"subject: {subject_text}\n"
+		f"issue: {normalized_ticket.normalized_issue}\n"
+		f"fallback_response: {deterministic_result.response}\n"
+		f"fallback_justification: {deterministic_result.justification}\n\n"
+		"Rewrite the response and justification only if the evidence supports them. "
+		"If the evidence is weak or conflicting, return the fallback response and fallback justification exactly.\n\n"
+		f"{evidence_text}"
+	)
+
+
+def _build_triage_prompt(
+	*,
+	normalized_ticket: NormalizedTicket,
+	resolved_company: Company | None,
+	candidate_product_areas: tuple[str, ...],
+	deterministic_result: OutputRow,
+	retrieved_chunks: tuple[RetrievedChunk, ...],
+) -> str:
+	company_text = resolved_company.value if resolved_company is not None else "unresolved"
+	subject_text = normalized_ticket.normalized_subject or "(none)"
+	evidence_text = _build_evidence_prompt(retrieved_chunks)
+	status_values = ", ".join(status.value for status in TicketStatus)
+	request_type_values = ", ".join(request_type.value for request_type in RequestType)
+	product_area_values = ", ".join(candidate_product_areas)
+	return (
+		f"company: {company_text}\n"
+		f"subject: {subject_text}\n"
+		f"issue: {normalized_ticket.normalized_issue}\n"
+		f"allowed_status_values: {status_values}\n"
+		f"allowed_request_type_values: {request_type_values}\n"
+		f"candidate_product_areas: {product_area_values}\n"
+		f"fallback_status: {deterministic_result.status.value}\n"
+		f"fallback_request_type: {deterministic_result.request_type.value}\n"
+		f"fallback_product_area: {deterministic_result.product_area}\n"
+		f"fallback_response: {deterministic_result.response}\n"
+		f"fallback_justification: {deterministic_result.justification}\n\n"
+		"Use only the local evidence below. If support is weak or conflicting, either escalate with a concise should_escalate_reason or return the fallback.\n\n"
+		f"{evidence_text}"
+	)
+
+
+def _build_review_prompt(
+	*,
+	normalized_ticket: NormalizedTicket,
+	resolved_company: Company | None,
+	deterministic_result: OutputRow,
+	retrieved_chunks: tuple[RetrievedChunk, ...],
+) -> str:
+	company_text = resolved_company.value if resolved_company is not None else "unresolved"
+	subject_text = normalized_ticket.normalized_subject or "(none)"
+	evidence_text = _build_evidence_prompt(retrieved_chunks)
+	return (
+		f"company: {company_text}\n"
+		f"subject: {subject_text}\n"
+		f"issue: {normalized_ticket.normalized_issue}\n"
+		f"status: {deterministic_result.status.value}\n"
+		f"request_type: {deterministic_result.request_type.value}\n"
+		f"product_area: {deterministic_result.product_area}\n"
+		f"response: {deterministic_result.response}\n"
+		f"justification: {deterministic_result.justification}\n\n"
+		"List only real risks. Return warnings only when the deterministic output appears weakly grounded, too internal, unsafe, or inconsistent with the evidence.\n\n"
+		f"{evidence_text}"
+	)
+
+
+def _build_deterministic_result(
+	*,
+	normalized_ticket: NormalizedTicket,
+	resolved_company: Company | None,
+	safety_decision: SafetyDecision,
+	retrieved_chunks: tuple[RetrievedChunk, ...],
+) -> tuple[OutputRow, RetrievedChunk | None]:
+	top_chunk = retrieved_chunks[0] if retrieved_chunks else None
+	if safety_decision.request_type is RequestType.INVALID:
+		return build_invalid_result(explicit_company=_trusted_company(normalized_ticket.company)), top_chunk
+
+	if resolved_company is None:
+		unresolved_domain_decision = _weak_evidence_decision(
+			reason="Ticket domain could not be resolved conservatively from the available ticket fields.",
+			request_type=safety_decision.request_type,
+			matched_rules=("unresolved_domain",),
+		)
+		return (
+			build_escalation_result(
+				unresolved_domain_decision,
+				resolved_company=resolved_company,
+				top_chunk=top_chunk,
+			),
+			top_chunk,
+		)
+
+	weak_evidence = evaluate_retrieval_safety(retrieved_chunks, expected_domain=resolved_company)
+	if weak_evidence is not None:
+		weak_evidence_decision = _weak_evidence_decision(
+			reason=weak_evidence.reason,
+			request_type=safety_decision.request_type,
+			matched_rules=weak_evidence.matched_rules,
+		)
+		return (
+			build_escalation_result(
+				weak_evidence_decision,
+				resolved_company=resolved_company,
+				top_chunk=top_chunk,
+			),
+			top_chunk,
+		)
+
+	if top_chunk is None:
+		no_results_decision = _weak_evidence_decision(
+			reason="Available retrieval evidence is missing, conflicting, or too weak to support a grounded answer.",
+			request_type=safety_decision.request_type,
+			matched_rules=("no_retrieval_results",),
+		)
+		return (
+			build_escalation_result(
+				no_results_decision,
+				resolved_company=resolved_company,
+			),
+			top_chunk,
+		)
+
+	product_area = map_retrieved_chunk_to_product_area(top_chunk, resolved_company)
+	reply_result = build_reply_result(
+		normalized_ticket=normalized_ticket,
+		resolved_company=resolved_company,
+		request_type=safety_decision.request_type,
+		product_area=product_area,
+		top_chunk=top_chunk,
+		retrieved_chunks=retrieved_chunks,
+	)
+	return (
+		OutputRow(
+			status=TicketStatus.REPLIED,
+			product_area=product_area,
+			response=reply_result.response,
+			justification=build_replied_justification(
+				top_chunk,
+				product_area=product_area,
+				resolved_company=resolved_company,
+				reply_result=reply_result,
+			),
+			request_type=safety_decision.request_type,
+		),
+		top_chunk,
+	)
+
+
+def _apply_synthesis_mode(
+	*,
+	normalized_ticket: NormalizedTicket,
+	resolved_company: Company | None,
+	deterministic_result: OutputRow,
+	retrieved_chunks: tuple[RetrievedChunk, ...],
+	environ: Mapping[str, str] | None,
+	transport: Transport | None,
+) -> tuple[OutputRow, dict[str, Any]]:
+	if deterministic_result.status is not TicketStatus.REPLIED:
+		return deterministic_result, {"outcome": "synthesis_skipped_non_replied", "llm_called": False}
+	if deterministic_result.request_type is RequestType.INVALID:
+		return deterministic_result, {"outcome": "synthesis_skipped_invalid", "llm_called": False}
+	if not retrieved_chunks:
+		return deterministic_result, {"outcome": "synthesis_skipped_no_evidence", "llm_called": False}
+
+	llm_result = call_structured_llm(
+		response_schema=_SynthesizedReply,
+		system_prompt=SYNTHESIS_SYSTEM_PROMPT,
+		user_prompt=_build_synthesis_prompt(
+			normalized_ticket=normalized_ticket,
+			resolved_company=resolved_company,
+			deterministic_result=deterministic_result,
+			retrieved_chunks=retrieved_chunks,
+		),
+		max_output_tokens=AI_SYNTHESIS_MAX_OUTPUT_TOKENS,
+		environ=environ,
+		transport=transport,
+	)
+	trace: dict[str, Any] = {
+		"llm_called": True,
+		"provider": llm_result.provider,
+		"model": llm_result.model,
+		"failure_reason": llm_result.failure_reason,
+	}
+	if not llm_result.succeeded or llm_result.value is None:
+		trace["outcome"] = f"synthesis_rejected_{llm_result.failure_reason or 'llm_unavailable'}"
+		return deterministic_result, trace
+
+	response_reason = _validate_customer_text(
+		"response",
+		llm_result.value.response,
+		retrieved_chunks=retrieved_chunks,
+	)
+	if response_reason is not None:
+		trace["outcome"] = f"synthesis_rejected_{response_reason}"
+		return deterministic_result, trace
+	justification_reason = _validate_customer_text(
+		"justification",
+		llm_result.value.justification,
+		retrieved_chunks=retrieved_chunks,
+	)
+	if justification_reason is not None:
+		trace["outcome"] = f"synthesis_rejected_{justification_reason}"
+		return deterministic_result, trace
+	if llm_result.value.evidence_support is EvidenceSupport.WEAK:
+		trace["outcome"] = "synthesis_rejected_weak_evidence"
+		return deterministic_result, trace
+
+	trace["outcome"] = "synthesis_accepted"
+	return (
+		OutputRow(
+			status=deterministic_result.status,
+			product_area=deterministic_result.product_area,
+			response=_normalize_output_text(llm_result.value.response),
+			justification=_normalize_output_text(llm_result.value.justification),
+			request_type=deterministic_result.request_type,
+		),
+		trace,
+	)
+
+
+def _apply_triage_mode(
+	*,
+	normalized_ticket: NormalizedTicket,
+	resolved_company: Company | None,
+	deterministic_result: OutputRow,
+	retrieved_chunks: tuple[RetrievedChunk, ...],
+	environ: Mapping[str, str] | None,
+	transport: Transport | None,
+) -> tuple[OutputRow, dict[str, Any]]:
+	if not retrieved_chunks:
+		return deterministic_result, {"outcome": "triage_skipped_no_evidence", "llm_called": False}
+
+	candidate_product_areas = _candidate_product_areas(
+		retrieved_chunks=retrieved_chunks,
+		resolved_company=resolved_company,
+		deterministic_product_area=deterministic_result.product_area,
+	)
+	llm_result = call_structured_llm(
+		response_schema=_TriagedOutput,
+		system_prompt=TRIAGE_SYSTEM_PROMPT,
+		user_prompt=_build_triage_prompt(
+			normalized_ticket=normalized_ticket,
+			resolved_company=resolved_company,
+			candidate_product_areas=candidate_product_areas,
+			deterministic_result=deterministic_result,
+			retrieved_chunks=retrieved_chunks,
+		),
+		max_output_tokens=AI_TRIAGE_MAX_OUTPUT_TOKENS,
+		environ=environ,
+		transport=transport,
+	)
+	trace: dict[str, Any] = {
+		"llm_called": True,
+		"provider": llm_result.provider,
+		"model": llm_result.model,
+		"failure_reason": llm_result.failure_reason,
+		"candidate_product_areas": list(candidate_product_areas),
+	}
+	if not llm_result.succeeded or llm_result.value is None:
+		trace["outcome"] = f"triage_rejected_{llm_result.failure_reason or 'llm_unavailable'}"
+		return deterministic_result, trace
+
+	try:
+		canonical_product_area = validate_product_area(llm_result.value.product_area)
+	except ValueError:
+		trace["outcome"] = "triage_rejected_invalid_product_area"
+		return deterministic_result, trace
+	if canonical_product_area not in candidate_product_areas:
+		trace["outcome"] = "triage_rejected_product_area_outside_candidates"
+		return deterministic_result, trace
+
+	response_reason = _validate_customer_text(
+		"response",
+		llm_result.value.response,
+		retrieved_chunks=retrieved_chunks,
+	)
+	if response_reason is not None:
+		trace["outcome"] = f"triage_rejected_{response_reason}"
+		return deterministic_result, trace
+	justification_reason = _validate_customer_text(
+		"justification",
+		llm_result.value.justification,
+		retrieved_chunks=retrieved_chunks,
+	)
+	if justification_reason is not None:
+		trace["outcome"] = f"triage_rejected_{justification_reason}"
+		return deterministic_result, trace
+
+	if llm_result.value.evidence_support is EvidenceSupport.WEAK:
+		if llm_result.value.status is not TicketStatus.ESCALATED:
+			trace["outcome"] = "triage_rejected_weak_replied_evidence"
+			return deterministic_result, trace
+		if not _normalize_output_text(llm_result.value.should_escalate_reason or ""):
+			trace["outcome"] = "triage_rejected_missing_should_escalate_reason"
+			return deterministic_result, trace
+
+	if llm_result.value.status is TicketStatus.ESCALATED and not _normalize_output_text(
+		llm_result.value.should_escalate_reason or ""
+	):
+		trace["outcome"] = "triage_rejected_missing_should_escalate_reason"
+		return deterministic_result, trace
+
+	trace["outcome"] = "triage_accepted"
+	return (
+		OutputRow(
+			status=llm_result.value.status,
+			product_area=canonical_product_area,
+			response=_normalize_output_text(llm_result.value.response),
+			justification=_normalize_output_text(llm_result.value.justification),
+			request_type=llm_result.value.request_type,
+		),
+		trace,
+	)
+
+
+def _run_review_mode(
+	*,
+	normalized_ticket: NormalizedTicket,
+	resolved_company: Company | None,
+	deterministic_result: OutputRow,
+	retrieved_chunks: tuple[RetrievedChunk, ...],
+	environ: Mapping[str, str] | None,
+	transport: Transport | None,
+) -> dict[str, Any]:
+	llm_result = call_structured_llm(
+		response_schema=_ReviewedOutput,
+		system_prompt=REVIEW_SYSTEM_PROMPT,
+		user_prompt=_build_review_prompt(
+			normalized_ticket=normalized_ticket,
+			resolved_company=resolved_company,
+			deterministic_result=deterministic_result,
+			retrieved_chunks=retrieved_chunks,
+		),
+		max_output_tokens=AI_REVIEW_MAX_OUTPUT_TOKENS,
+		environ=environ,
+		transport=transport,
+	)
+	trace: dict[str, Any] = {
+		"llm_called": True,
+		"provider": llm_result.provider,
+		"model": llm_result.model,
+		"failure_reason": llm_result.failure_reason,
+	}
+	if not llm_result.succeeded or llm_result.value is None:
+		trace["outcome"] = f"review_rejected_{llm_result.failure_reason or 'llm_unavailable'}"
+		return trace
+
+	warnings = tuple(_normalize_output_text(warning) for warning in llm_result.value.warnings if _normalize_output_text(warning))
+	trace["warnings"] = list(warnings)
+	trace["summary"] = _normalize_output_text(llm_result.value.summary or "") if llm_result.value.summary else ""
+	trace["outcome"] = "review_called_warnings" if warnings else "review_called_clean"
+	return trace
+
+
+def _enum_value(value: Any) -> Any:
+	if hasattr(value, "value"):
+		return value.value
+	return value
+
+
+def _append_ai_trace(
+	*,
+	ai_mode: AIMode,
+	normalized_ticket: NormalizedTicket,
+	resolved_company: Company | None,
+	deterministic_result: OutputRow,
+	final_result: OutputRow,
+	trace: Mapping[str, Any],
+) -> None:
+	entry = {
+		"timestamp": datetime.now(timezone.utc).isoformat(),
+		"mode": ai_mode.value,
+		"company": (resolved_company or _trusted_company(normalized_ticket.company) or Company.NONE).value,
+		"subject": normalized_ticket.subject or "",
+		"issue_preview": normalized_ticket.issue[:160],
+		"outcome": trace.get("outcome", "unknown"),
+		"llm_called": bool(trace.get("llm_called", False)),
+		"provider": trace.get("provider"),
+		"model": trace.get("model"),
+		"failure_reason": trace.get("failure_reason"),
+		"warnings": trace.get("warnings", []),
+		"details": {key: _enum_value(value) for key, value in (trace.get("details") or {}).items()},
+		"candidate_product_areas": trace.get("candidate_product_areas", []),
+		"deterministic": {
+			"status": deterministic_result.status.value,
+			"request_type": deterministic_result.request_type.value,
+			"product_area": deterministic_result.product_area,
+		},
+		"final": {
+			"status": final_result.status.value,
+			"request_type": final_result.request_type.value,
+			"product_area": final_result.product_area,
+		},
+	}
+	AI_TRACE_PATH.parent.mkdir(parents=True, exist_ok=True)
+	with AI_TRACE_PATH.open("a", encoding="utf-8") as handle:
+		handle.write(json.dumps(entry, ensure_ascii=True) + "\n")
+
+
 def _serialize_result(result: OutputRow) -> dict[str, str]:
 	return {
 		"status": result.status.value,
@@ -253,76 +849,103 @@ def process_ticket(
 	llm_environ: Mapping[str, str] | None = None,
 	llm_transport: Transport | None = None,
 ) -> dict[str, str]:
-	"""Run the deterministic ticket baseline without any provider dependency."""
+	"""Run the deterministic baseline with optional bounded AI overlays."""
 
+	ai_mode = _resolve_ai_mode(llm_environ)
 	normalized_ticket = normalize_ticket(ticket)
 	resolved_company = normalized_ticket.detected_company or _trusted_company(normalized_ticket.company)
 	safety_decision = assess_ticket_safety(normalized_ticket)
 	if safety_decision.should_escalate:
-		return _serialize_result(
-			build_escalation_result(safety_decision, resolved_company=resolved_company)
-		)
-
-	if safety_decision.request_type is RequestType.INVALID:
-		return _serialize_result(
-			build_invalid_result(explicit_company=_trusted_company(normalized_ticket.company))
-		)
-
-	if resolved_company is None:
-		unresolved_domain_decision = _weak_evidence_decision(
-			reason="Ticket domain could not be resolved conservatively from the available ticket fields.",
-			request_type=safety_decision.request_type,
-			matched_rules=("unresolved_domain",),
-		)
-		return _serialize_result(
-			build_escalation_result(unresolved_domain_decision, resolved_company=resolved_company)
-		)
-
-	query_text = build_query_text(normalized_ticket.normalized_subject, normalized_ticket.normalized_issue)
-	expanded_query_text = expand_query_text(query_text)
-	retrieved_chunks = rerank_retrieved_chunks(
-		expanded_query_text,
-		retrieve_chunks(expanded_query_text, domain=resolved_company, top_k=RETRIEVAL_TOP_K),
-	)
-	weak_evidence = evaluate_retrieval_safety(retrieved_chunks, expected_domain=resolved_company)
-	if weak_evidence is not None:
-		weak_evidence_decision = _weak_evidence_decision(
-			reason=weak_evidence.reason,
-			request_type=safety_decision.request_type,
-			matched_rules=weak_evidence.matched_rules,
-		)
-		return _serialize_result(
-			build_escalation_result(
-				weak_evidence_decision,
+		deterministic_result = build_escalation_result(safety_decision, resolved_company=resolved_company)
+		trace: dict[str, Any] = {
+			"outcome": "vetoed_high_risk_safety",
+			"llm_called": False,
+			"details": {
+				"category": safety_decision.category.value if safety_decision.category is not None else "none",
+			}
+		}
+		if ai_mode is AIMode.REVIEW:
+			trace = _run_review_mode(
+				normalized_ticket=normalized_ticket,
 				resolved_company=resolved_company,
-				top_chunk=retrieved_chunks[0] if retrieved_chunks else None,
+				deterministic_result=deterministic_result,
+				retrieved_chunks=(),
+				environ=llm_environ,
+				transport=llm_transport,
+			)
+			trace["details"] = {
+				"category": safety_decision.category.value if safety_decision.category is not None else "none",
+				"safety_veto": True,
+			}
+		_append_ai_trace(
+			ai_mode=ai_mode,
+			normalized_ticket=normalized_ticket,
+			resolved_company=resolved_company,
+			deterministic_result=deterministic_result,
+			final_result=deterministic_result,
+			trace=trace,
+		)
+		return _serialize_result(deterministic_result)
+
+	retrieved_chunks: tuple[RetrievedChunk, ...] = ()
+	if resolved_company is not None or ai_mode is AIMode.TRIAGE:
+		query_text = build_query_text(normalized_ticket.normalized_subject, normalized_ticket.normalized_issue)
+		expanded_query_text = expand_query_text(query_text)
+		retrieved_chunks = tuple(
+			rerank_retrieved_chunks(
+				expanded_query_text,
+				retrieve_chunks(
+					expanded_query_text,
+					domain=resolved_company,
+					top_k=RETRIEVAL_TOP_K,
+				),
 			)
 		)
 
-	top_chunk = retrieved_chunks[0]
-	product_area = map_retrieved_chunk_to_product_area(top_chunk, resolved_company)
-	reply_result = build_reply_result(
+	deterministic_result, _ = _build_deterministic_result(
 		normalized_ticket=normalized_ticket,
 		resolved_company=resolved_company,
-		request_type=safety_decision.request_type,
-		product_area=product_area,
-		top_chunk=top_chunk,
+		safety_decision=safety_decision,
 		retrieved_chunks=retrieved_chunks,
-		llm_environ=llm_environ,
-		llm_transport=llm_transport,
 	)
+	final_result = deterministic_result
 
-	result = OutputRow(
-		status=TicketStatus.REPLIED,
-		product_area=product_area,
-		response=reply_result.response,
-		justification=build_replied_justification(
-			top_chunk,
-			product_area=product_area,
+	if ai_mode is AIMode.OFF:
+		trace = {"outcome": "skipped_off", "llm_called": False}
+	elif ai_mode is AIMode.SYNTHESIS:
+		final_result, trace = _apply_synthesis_mode(
+			normalized_ticket=normalized_ticket,
 			resolved_company=resolved_company,
-			reply_result=reply_result,
-		),
-		request_type=safety_decision.request_type,
-	)
+			deterministic_result=deterministic_result,
+			retrieved_chunks=retrieved_chunks,
+			environ=llm_environ,
+			transport=llm_transport,
+		)
+	elif ai_mode is AIMode.TRIAGE:
+		final_result, trace = _apply_triage_mode(
+			normalized_ticket=normalized_ticket,
+			resolved_company=resolved_company,
+			deterministic_result=deterministic_result,
+			retrieved_chunks=retrieved_chunks,
+			environ=llm_environ,
+			transport=llm_transport,
+		)
+	else:
+		trace = _run_review_mode(
+			normalized_ticket=normalized_ticket,
+			resolved_company=resolved_company,
+			deterministic_result=deterministic_result,
+			retrieved_chunks=retrieved_chunks,
+			environ=llm_environ,
+			transport=llm_transport,
+		)
 
-	return _serialize_result(result)
+	_append_ai_trace(
+		ai_mode=ai_mode,
+		normalized_ticket=normalized_ticket,
+		resolved_company=resolved_company,
+		deterministic_result=deterministic_result,
+		final_result=final_result,
+		trace=trace,
+	)
+	return _serialize_result(final_result)

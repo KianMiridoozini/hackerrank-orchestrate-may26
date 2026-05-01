@@ -227,6 +227,8 @@ def _send_json_request(
 	try:
 		with request.urlopen(request_object, timeout=timeout_seconds) as response:
 			response_bytes = response.read()
+	except TimeoutError as exc:  # pragma: no cover - depends on live provider behavior.
+		raise RuntimeError("network_error:timeout") from exc
 	except error.HTTPError as exc:  # pragma: no cover - depends on live provider behavior.
 		detail = exc.read().decode("utf-8", errors="replace")
 		raise RuntimeError(f"http_error:{exc.code}:{detail}") from exc

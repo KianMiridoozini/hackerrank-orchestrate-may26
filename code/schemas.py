@@ -52,6 +52,19 @@ class Company(str, Enum):
 	NONE = "None"
 
 
+class AIMode(str, Enum):
+	OFF = "off"
+	SYNTHESIS = "synthesis"
+	TRIAGE = "triage"
+	REVIEW = "review"
+
+
+class EvidenceSupport(str, Enum):
+	STRONG = "strong"
+	PARTIAL = "partial"
+	WEAK = "weak"
+
+
 class TicketStatus(str, Enum):
 	REPLIED = "replied"
 	ESCALATED = "escalated"
