@@ -49,9 +49,9 @@ Last updated: `VERIFIED`
 
 Updated by: `GitHub Copilot`
 
-Current focus: `Step 7 is verified: code/corpus.py now splits long documents by headings, keeps short FAQ pages whole, and reuses a local corpus cache artifact.`
+Current focus: `Step 8 is verified: code/retriever.py now builds a BM25 index over cached corpus chunks, filters by domain, and returns provenance-preserving retrieval results.`
 
-Current recommended next action: `Start Step 8: implement lexical retrieval with domain filtering and chunk provenance.`
+Current recommended next action: `Start Step 9: implement conservative domain detection in code/agent.py using company first and retrieval-backed fallback second.`
 
 ---
 
@@ -60,7 +60,7 @@ Current recommended next action: `Start Step 8: implement lexical retrieval with
 | ID | Milestone | Status | Evidence | Notes |
 |---|---|---|---|---|
 | A | Batch skeleton works | VERIFIED | `python code/main.py --output ../support_tickets/output.step4.csv` ran without crashing after `pydantic` was installed in the workspace venv; the command resolved `support_tickets/`, loaded 29 tickets, and wrote 29 rows. A follow-up CSV check confirmed the output header matched the sample header exactly. | `support_tickets/output.step4.csv` was used as the validation artifact for the Step 4 batch skeleton. |
-| B | Corpus and taxonomy work | VERIFIED | `code/taxonomy.py` builds a 140-label allowed vocabulary from the sample CSV plus corpus folders and index breadcrumbs; `code/corpus.py` now discovers 773 markdown files, writes `code/.cache/corpus_cache.json`, and produces heading-aware chunk artifacts. Validation confirmed the April 2026 release notes file split into 66 chunks with heading context, a short Claude FAQ stayed as a single chunk, and manual inspection of `CorpusChunk` plus cache serialization preserved `source_path`, `title`, `breadcrumbs`, and `heading` provenance.` | Retrieval itself is still pending, but the corpus and taxonomy gate described for Milestone B now has concrete evidence. |
+| B | Corpus and taxonomy work | VERIFIED | `code/taxonomy.py` builds a 140-label allowed vocabulary from the sample CSV plus corpus folders and index breadcrumbs; `code/corpus.py` now discovers 773 markdown files, writes `code/.cache/corpus_cache.json`, and produces heading-aware chunk artifacts. Validation confirmed the April 2026 release notes file split into 66 chunks with heading context, a short Claude FAQ stayed as a single chunk, and manual inspection of `CorpusChunk` plus cache serialization preserved `source_path`, `title`, `breadcrumbs`, and `heading` provenance. | Retrieval itself is still pending, but the corpus and taxonomy gate described for Milestone B now has concrete evidence. |
 | C | Deterministic baseline works | NOT_STARTED | - | Agent can route, retrieve, escalate, and emit complete outputs without any LLM/provider dependency. |
 | D | Sample evaluation is informative | NOT_STARTED | - | `evaluate_sample.py` reports categorical mismatches clearly. |
 | E | Optional LLM layer is additive | NOT_STARTED | - | Provider-backed synthesis improves safe replies without weakening categorical consistency or safety. |
@@ -167,7 +167,7 @@ Can be marked `VERIFIED` only when:
 | 5 | Build taxonomy module | VERIFIED | `implementation-status.md`, `code/taxonomy.py` | `get_errors` reported no issues in `code/taxonomy.py`; a Python validation snippet confirmed the six sample labels were present, `validate_product_area("screen")` succeeded, `validate_product_area("totally_unknown_label")` raised a `ValueError`, and evidence mapping resolved example paths to `conversation_management`, `travel_support`, and `community`. | Start Step 6: build the corpus parser. |
 | 6 | Build corpus parser | VERIFIED | `implementation-status.md`, `code/corpus.py` | `get_errors` initially showed no editor issues, then a Python validation snippet caught and helped confirm a regex syntax fix; the rerun discovered 773 markdown files, parsed `data/claude/claude/features-and-capabilities/14465370-use-claude-for-word.md` with title `Use Claude for Word` and breadcrumbs `('Claude', 'Features and capabilities')`, flagged `data/claude/index.md` as `navigation_index`, and flagged `data/visa/support/consumer/checkout-fees-contact-form.md` as `short_stub`. | Start Step 7: add heading-aware chunking. |
 | 7 | Add heading-aware chunking | VERIFIED | `implementation-status.md`, `code/corpus.py`, `code/.cache/corpus_cache.json` | `get_errors` surfaced one local syntax issue which was repaired immediately; Python validation then confirmed the April 2026 release notes file split into 66 chunks with heading context, the Claude conversation-management FAQ stayed as one chunk, `code/.cache/corpus_cache.json` existed after the first build, and repeated artifact loads returned the same record and chunk counts (`773` records, `4788` chunks). | Start Step 8: implement lexical retrieval. |
-| 8 | Implement lexical retrieval | NOT_STARTED | - | - | Add TF-IDF or BM25 retrieval with domain filtering and provenance. |
+| 8 | Implement lexical retrieval | VERIFIED | `implementation-status.md`, `code/retriever.py` | A Python validation snippet built the BM25 index over `4788` cached chunks, confirmed a Claude conversation-management query returned only Claude-domain results and ranked `claude/claude/conversation-management/8230524-how-can-i-delete-or-rename-a-conversation.md` first, and confirmed a HackerRank release-notes query returned only HackerRank-domain results and ranked the matching release-notes heading chunk first with populated title, breadcrumbs, source path, score, and rank. | Start Step 9: implement conservative domain detection. |
 | 9 | Implement domain detection | NOT_STARTED | - | - | Trust `company` when plausible; infer cautiously when missing. |
 | 10 | Implement safety and `request_type` rules | NOT_STARTED | - | - | Add deterministic escalation categories and request heuristics. |
 | 11 | Connect deterministic baseline | NOT_STARTED | - | - | Route, retrieve, escalate, map product area, and emit complete rows without LLM. |
@@ -456,3 +456,10 @@ Append short project-state updates here when useful. Do not use this as a replac
 - Agent: `GitHub Copilot`
 - Summary: `Step 7 extended code/corpus.py with heading-aware chunking for long documents and a disk-backed corpus cache keyed to the markdown manifest.`
 - Evidence: `Python validation confirmed the April 2026 release notes file split into 66 chunks with heading context, the short Claude conversation FAQ stayed whole, and repeated corpus loads reused the cache artifact while keeping the same record and chunk counts.`
+
+### Update 9
+
+- Timestamp: `2026-05-01T14:04:05.0737565+02:00`
+- Agent: `GitHub Copilot`
+- Summary: `Step 8 filled code/retriever.py with BM25 retrieval over cached corpus chunks, including domain filtering and provenance-preserving RetrievedChunk results.`
+- Evidence: `A Python validation snippet built the BM25 index over 4788 chunks, kept a Claude conversation-management query fully inside the Claude domain while ranking the delete-or-rename FAQ first, and kept a HackerRank release-notes query fully inside the HackerRank domain while ranking the matching heading chunk first with title, breadcrumbs, source path, score, and rank populated.`
