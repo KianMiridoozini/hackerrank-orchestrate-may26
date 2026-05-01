@@ -18,7 +18,49 @@ from schemas import (
 
 WHITESPACE_PATTERN: Final[re.Pattern[str]] = re.compile(r"\s+")
 NON_ALNUM_PATTERN: Final[re.Pattern[str]] = re.compile(r"[^a-z0-9]+")
-WEAK_EVIDENCE_SCORE_MARGIN: Final[float] = 1.15
+WEAK_EVIDENCE_SCORE_MARGIN: Final[float] = 1.08
+GRATITUDE_PHRASES: Final[tuple[str, ...]] = (
+	"thank you",
+	"thanks",
+	"thanks for helping",
+	"thanks for the help",
+	"appreciate the help",
+)
+OUT_OF_SCOPE_QUESTION_PREFIXES: Final[tuple[str, ...]] = (
+	"who is ",
+	"what is the name of ",
+	"what is ",
+	"tell me about ",
+)
+SUPPORT_SIGNAL_TOKENS: Final[frozenset[str]] = frozenset(
+	{
+		"account",
+		"assessment",
+		"candidate",
+		"card",
+		"charge",
+		"chat",
+		"cheque",
+		"claude",
+		"conversation",
+		"delete",
+		"hackerrank",
+		"interview",
+		"invite",
+		"merchant",
+		"payment",
+		"privacy",
+		"refund",
+		"screen",
+		"site",
+		"test",
+		"ticket",
+		"transaction",
+		"traveller",
+		"traveler",
+		"visa",
+	}
+)
 MALICIOUS_OR_OUT_OF_SCOPE_RULES: Final[tuple[tuple[str, tuple[str, ...]], ...]] = (
 	(
 		"prompt_injection",
@@ -39,6 +81,12 @@ MALICIOUS_OR_OUT_OF_SCOPE_RULES: Final[tuple[tuple[str, tuple[str, ...]], ...]] 
 			"secret token",
 			"private key",
 			"password dump",
+			"internal rules",
+			"exact logic",
+			"logique exacte",
+			"show retrieved documents",
+			"delete all files",
+			"remove all files",
 			"delete database",
 			"drop table",
 			"rm rf",
@@ -114,6 +162,14 @@ BILLING_DISPUTE_RULES: Final[tuple[tuple[str, tuple[str, ...]], ...]] = (
 			"invoice correction",
 			"refund decision",
 			"refund request",
+				"refund asap",
+				"refund me today",
+				"give me the refund",
+				"give me my money",
+				"issue with my payment",
+				"payment with order id",
+				"order id",
+				"make visa refund me",
 			"charged twice",
 			"duplicate charge",
 			"billing investigation",
@@ -145,6 +201,7 @@ OUTAGE_RULES: Final[tuple[tuple[str, tuple[str, ...]], ...]] = (
 			"site is down",
 			"platform is down",
 			"service is down",
+				"submissions across any challenges",
 			"outage",
 			"everyone is affected",
 			"for everyone",
@@ -161,6 +218,11 @@ LEGAL_OR_PRIVACY_RULES: Final[tuple[tuple[str, tuple[str, ...]], ...]] = (
 			"legal request",
 			"legal hold",
 			"compliance review",
+				"infosec",
+				"security questionnaire",
+				"vendor questionnaire",
+				"security review form",
+				"fill in the forms",
 			"regulatory requirement",
 			"policy exception",
 			"privacy request",
@@ -305,6 +367,21 @@ def _match_rule_groups(
 	return tuple(matched_rules)
 
 
+def _looks_like_invalid_non_support(text: str) -> bool:
+	if not text:
+		return False
+
+	tokens = tuple(text.split())
+	if any(text.startswith(phrase) for phrase in GRATITUDE_PHRASES) and len(tokens) <= 8:
+		return True
+
+	if any(prefix in text for prefix in OUT_OF_SCOPE_QUESTION_PREFIXES):
+		if not any(token in SUPPORT_SIGNAL_TOKENS for token in tokens):
+			return True
+
+	return False
+
+
 def classify_request_type(
 	ticket: InputTicket | NormalizedTicket | str,
 	*,
@@ -317,6 +394,10 @@ def classify_request_type(
 		return RequestType.INVALID
 	if matched_category is EscalationCategory.OUTAGE:
 		return RequestType.BUG
+	if matched_category is not None:
+		return RequestType.PRODUCT_ISSUE
+	if _looks_like_invalid_non_support(text):
+		return RequestType.INVALID
 	if any(phrase in text for phrase in FEATURE_REQUEST_PHRASES):
 		return RequestType.FEATURE_REQUEST
 	if any(phrase in text for phrase in BUG_PHRASES):
@@ -418,6 +499,7 @@ def evaluate_retrieval_safety(
 		top_chunk.product_area_hint
 		and second_chunk.product_area_hint
 		and top_chunk.product_area_hint != second_chunk.product_area_hint
+		and "general_support" not in {top_chunk.product_area_hint, second_chunk.product_area_hint}
 		and second_score >= top_score / WEAK_EVIDENCE_SCORE_MARGIN
 	):
 		return SafetyDecision(

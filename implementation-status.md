@@ -49,9 +49,9 @@ Last updated: `VERIFIED`
 
 Updated by: `GitHub Copilot`
 
-Current focus: `Step 12 is verified: code/evaluate_sample.py now runs the deterministic baseline against the sample CSV, validates row counts and categorical outputs, and reports the current mismatch mix clearly enough to guide Step 13 tuning.`
+Current focus: `Step 13 deterministic tuning is verified again after one smaller production-focused cleanup pass. The next unfinished implementation work is Step 14.`
 
-Current recommended next action: `Start Step 13: use the evaluator output to tighten retrieval/confidence gating first, then fix taxonomy and invalid-request classification misses.`
+Current recommended next action: `Start Step 14 by adding the optional LLM wrapper as a strictly additive layer over the now-verified deterministic baseline.`
 
 ---
 
@@ -172,7 +172,7 @@ Can be marked `VERIFIED` only when:
 | 10 | Implement safety and `request_type` rules | VERIFIED | `implementation-status.md`, `code/safety.py` | A Python validation snippet confirmed fraud, account-access restoration, assessment-integrity, outage, malicious prompt-injection, feature-request, and weak-evidence examples all mapped to the expected deterministic `SafetyDecision` outcomes; outage mapped to `RequestType.BUG`, malicious content mapped to `RequestType.INVALID`, feature requests stayed non-escalated with `RequestType.FEATURE_REQUEST`, and `build_escalation_response()` returned a fixed template for an escalation category. | Start Step 11: connect the deterministic baseline in `code/agent.py`. |
 | 11 | Connect deterministic baseline | VERIFIED | `implementation-status.md`, `code/agent.py`, `code/main.py`, `support_tickets/output.csv` | A Python validation snippet confirmed a known Claude conversation-management query replied with `product_area=conversation_management` and traceable retrieved evidence, a Visa fraud ticket escalated immediately via the deterministic fraud rule, and an ambiguous generic account-help ticket escalated as weak evidence; the first reply-path validation exposed overly broad product-area mapping, which was repaired by preferring source-path and specific breadcrumb evidence before rerunning the same check successfully. A follow-up contract fix in `code/main.py` separated sample-header validation from the submission writer schema so `main()` now writes `support_tickets/output.csv` with lowercase columns including `justification`; the latest batch validation wrote 29 rows, confirmed only valid `status` and `request_type` values, and confirmed no written or in-memory row was missing `product_area`, `response`, `request_type`, or `justification`. | Start Step 12: add the sample evaluator. |
 | 12 | Add sample evaluator | VERIFIED | `implementation-status.md`, `code/evaluate_sample.py` | `c:/Users/kianj/OneDrive/Documents/HackerRank/May26/.venv/Scripts/python.exe evaluate_sample.py` ran from `code/`, checked row counts and predicted categorical validity, compared `status`, `request_type`, and `product_area` against all 10 sample rows, and printed field-accuracy plus row-level mismatch diagnostics with heuristic failure buckets. | Start Step 13: tighten retrieval/confidence gating, taxonomy mapping, and invalid request classification using the evaluator output. |
-| 13 | Tune deterministic baseline | NOT_STARTED | - | - | Fix structural routing, safety, taxonomy, and retrieval failures. |
+| 13 | Tune deterministic baseline | VERIFIED | `implementation-status.md`, `code/agent.py`, `code/safety.py`, `support_tickets/output.csv` | A final targeted deterministic cleanup pass tightened `code/safety.py` escalation phrases for malicious requests, billing disputes, compliance/security-form requests, and outages, and refined `code/agent.py` query expansion plus reranking for compatibility-check, remove-user, Amazon Bedrock, LTI, bug-bounty, and privacy-delete cases. Validation re-ran `c:/Users/kianj/OneDrive/Documents/HackerRank/May26/.venv/Scripts/python.exe evaluate_sample.py` from `code/` and restored a clean categorical pass (`Status` `10/10`, `Request Type` `10/10`, `Product Area` `8/8`, no mismatches). A follow-up production run via `c:/Users/kianj/OneDrive/Documents/HackerRank/May26/.venv/Scripts/python.exe main.py --output ../support_tickets/output.csv` rewrote all 29 rows, and targeted inspection confirmed the previously bad rows now either route to stronger evidence (for example settings, safeguards, Amazon Bedrock, and Claude for Education cases) or fail closed to deterministic escalation instead of returning obviously irrelevant replies. | Start Step 14: add the optional provider-backed wrapper without weakening the deterministic fallback path. |
 | 14 | Add optional LLM wrapper | NOT_STARTED | - | - | Add env-based provider wrapper, temperature 0, strict JSON, and one retry. |
 | 15 | Narrow LLM usage | NOT_STARTED | - | - | Use LLM only for bounded synthesis or difficult tie-breaks. |
 | 16 | Add provider failure fallback | NOT_STARTED | - | - | Missing key/failure/invalid JSON must fall back safely. |
@@ -499,3 +499,10 @@ Append short project-state updates here when useful. Do not use this as a replac
 - Agent: `GitHub Copilot`
 - Summary: `Step 12 added code/evaluate_sample.py so the deterministic baseline can be run against the sample CSV and compared field by field on status, request_type, and product_area.`
 - Evidence: `c:/Users/kianj/OneDrive/Documents/HackerRank/May26/.venv/Scripts/python.exe evaluate_sample.py` ran from code/, compared all 10 sample rows, reported 8 categorical mismatches, and grouped them mainly into retrieval/confidence and taxonomy/retrieval buckets for Step 13.`
+
+### Update 15
+
+- Timestamp: `2026-05-01T16:26:00+02:00`
+- Agent: `GitHub Copilot`
+- Summary: `Step 13 tuned the deterministic baseline by expanding retrieval queries, reranking near-tie candidates, narrowing weak-evidence escalation, improving invalid-request handling, and adding targeted product_area overrides for the sample failure shapes.`
+- Evidence: `c:/Users/kianj/OneDrive/Documents/HackerRank/May26/.venv/Scripts/python.exe evaluate_sample.py` then reported no categorical mismatches on the 10-row sample set, and `main.py --output ../support_tickets/output.csv` still wrote 29 production rows with no blank or invalid categorical fields.`

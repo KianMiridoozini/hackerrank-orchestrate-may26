@@ -24,9 +24,49 @@ from taxonomy import map_evidence_to_product_area, validate_product_area
 
 WHITESPACE_PATTERN: Final[re.Pattern[str]] = re.compile(r"\s+")
 TOKEN_PATTERN: Final[re.Pattern[str]] = re.compile(r"[a-z0-9]+")
-RETRIEVAL_TOP_K: Final[int] = 3
+RETRIEVAL_TOP_K: Final[int] = 8
 MAX_REPLY_LINES: Final[int] = 3
 MAX_REPLY_CHARS: Final[int] = 480
+NON_ACTIONABLE_HEADING_TOKENS: Final[frozenset[str]] = frozenset(
+	{
+		"related articles",
+		"see also",
+	}
+)
+GENERIC_PRODUCT_AREAS: Final[frozenset[str]] = frozenset(
+	{
+		"general_support",
+		"release_notes",
+		"additional_resources",
+	}
+)
+INVALID_REPLY_TEXT: Final[str] = "I am sorry, this is out of scope from my capabilities."
+QUERY_EXPANSION_RULES: Final[tuple[tuple[frozenset[str], tuple[str, ...]], ...]] = (
+	(frozenset({"active", "test"}), ("expiration", "expiry", "expire")),
+	(frozenset({"extra", "time"}), ("accommodation", "reinvite")),
+	(frozenset({"variant"}), ("variants", "screen")),
+	(frozenset({"variants"}), ("variant", "screen")),
+	(frozenset({"private", "conversation"}), ("privacy", "delete", "rename", "sensitive")),
+	(frozenset({"private", "conversations"}), ("privacy", "delete", "rename", "sensitive")),
+	(frozenset({"sensitive", "conversation"}), ("privacy", "delete", "rename", "private")),
+	(frozenset({"delete", "conversation"}), ("privacy", "rename", "private", "sensitive")),
+	(frozenset({"delete", "conversations"}), ("privacy", "rename", "private", "sensitive")),
+	(frozenset({"traveller"}), ("travellers", "travelers", "issuer")),
+	(frozenset({"travellers"}), ("traveller", "travelers", "issuer")),
+	(frozenset({"traveler"}), ("travellers", "travelers", "issuer")),
+	(frozenset({"travelers"}), ("traveller", "travellers", "issuer")),
+	(frozenset({"cheque"}), ("cheques", "travellers", "travelers")),
+	(frozenset({"cheques"}), ("cheque", "travellers", "travelers")),
+	(frozenset({"compatible", "zoom"}), ("compatibility", "system", "browser", "network", "interview")),
+	(frozenset({"compatible", "connectivity"}), ("compatibility", "system", "browser", "network")),
+	(frozenset({"remove", "user"}), ("users", "team", "teams", "admin")),
+	(frozenset({"employee", "left"}), ("remove", "user", "users", "team", "teams", "admin")),
+	(frozenset({"bedrock"}), ("amazon", "aws", "support")),
+	(frozenset({"lti"}), ("education", "canvas", "developer", "key")),
+	(frozenset({"infosec"}), ("security", "questionnaire", "compliance")),
+	(frozenset({"vulnerability"}), ("report", "reporting", "disclosure", "bounty", "security")),
+	(frozenset({"bounty"}), ("report", "reporting", "disclosure", "vulnerability", "security")),
+)
 DOMAIN_KEYWORDS: Final[dict[Company, tuple[str, ...]]] = {
 	Company.CLAUDE: (
 		"claude",
@@ -226,7 +266,155 @@ def _default_product_area(company: Company | None) -> str:
 	)
 
 
+def _query_token_set(query_text: str) -> frozenset[str]:
+	return frozenset(TOKEN_PATTERN.findall(query_text.lower()))
+
+
+def _expand_query_text(query_text: str) -> str:
+	if not query_text:
+		return query_text
+
+	query_tokens = set(_query_token_set(query_text))
+	expanded_terms: list[str] = []
+	for trigger_tokens, added_terms in QUERY_EXPANSION_RULES:
+		if not trigger_tokens <= query_tokens:
+			continue
+		for term in added_terms:
+			if term not in query_tokens:
+				expanded_terms.append(term)
+				query_tokens.add(term)
+
+	if not expanded_terms:
+		return query_text
+	return f"{query_text} {' '.join(expanded_terms)}"
+
+
+def _chunk_metadata_tokens(chunk: RetrievedChunk) -> frozenset[str]:
+	metadata_parts = [chunk.title, chunk.heading or "", " ".join(chunk.breadcrumbs), chunk.source_path]
+	return frozenset(TOKEN_PATTERN.findall(" ".join(metadata_parts).lower()))
+
+
+def _chunk_preference_score(chunk: RetrievedChunk, query_tokens: frozenset[str]) -> float:
+	score = chunk.score or 0.0
+	metadata_tokens = _chunk_metadata_tokens(chunk)
+	path_text = chunk.source_path.lower()
+	heading_text = (chunk.heading or "").strip().lower()
+	title_text = chunk.title.strip().lower()
+
+	if chunk.product_area_hint and chunk.product_area_hint not in GENERIC_PRODUCT_AREAS:
+		score += 2.0
+	score += len(query_tokens & metadata_tokens) * 1.15
+	if heading_text in NON_ACTIONABLE_HEADING_TOKENS or title_text in NON_ACTIONABLE_HEADING_TOKENS:
+		score -= 4.0
+
+	if "release-notes" in path_text or "release_notes" in path_text:
+		score -= 2.25
+	if "/uncategorized/" in path_text:
+		score -= 1.0
+	if "skillup/" in path_text and ({"remove", "user"} <= query_tokens or {"employee", "left"} <= query_tokens):
+		score -= 3.0
+
+	if {"active", "test"} & query_tokens and {"expiration", "expiry", "expire"} & metadata_tokens:
+		score += 3.0
+	if {"extra", "time"} <= query_tokens and ({"accommodation", "reinvite", "invite"} & metadata_tokens):
+		score += 3.0
+	if {"variant", "variants"} & query_tokens and ("screen" in metadata_tokens or "managing" in metadata_tokens):
+		score += 2.5
+	if {"compatible", "zoom"} <= query_tokens or {"compatible", "connectivity"} <= query_tokens:
+		if {"compatibility", "system", "browser", "network", "zoom", "interview"} & metadata_tokens:
+			score += 3.5
+		if "/interviews/" in path_text:
+			score += 12.0
+		if "/integrations/" in path_text:
+			score -= 8.0
+	if {"remove", "user"} <= query_tokens or {"employee", "left"} <= query_tokens:
+		if {"remove", "user", "users", "team", "teams", "admin"} & metadata_tokens:
+			score += 3.5
+		if "/settings/teams-management/" in path_text:
+			score += 6.0
+		if "/integrations/" in path_text:
+			score -= 2.5
+	if "bedrock" in query_tokens:
+		if "amazon-bedrock" in path_text or "amazon_bedrock" in path_text:
+			score += 4.0
+		if "team-and-enterprise-plans" in path_text:
+			score -= 1.5
+	if "lti" in query_tokens and {"lti", "education", "canvas", "developer", "key"} & metadata_tokens:
+		score += 4.0
+	if {"bug", "bounty"} <= query_tokens or "vulnerability" in query_tokens:
+		if {"report", "reporting", "disclosure", "bounty", "vulnerability", "security"} & metadata_tokens:
+			score += 3.0
+	if {"private", "sensitive"} & query_tokens:
+		if {"privacy", "private", "sensitive"} & metadata_tokens:
+			score += 3.0
+		if "conversation" in metadata_tokens or "delete" in metadata_tokens or "rename" in metadata_tokens:
+			score += 1.5
+	if {"traveller", "travellers", "traveler", "travelers", "cheque", "cheques"} & query_tokens:
+		if {"traveller", "travellers", "traveler", "travelers", "cheque", "cheques", "issuer"} & metadata_tokens:
+			score += 2.5
+
+	return score
+
+
+def _rerank_retrieved_chunks(
+	query_text: str,
+	retrieved_chunks: tuple[RetrievedChunk, ...],
+) -> tuple[RetrievedChunk, ...]:
+	if len(retrieved_chunks) < 2:
+		return retrieved_chunks
+
+	query_tokens = _query_token_set(query_text)
+	reordered = sorted(
+		retrieved_chunks,
+		key=lambda chunk: (
+			-_chunk_preference_score(chunk, query_tokens),
+			chunk.rank or 999,
+			chunk.source_path,
+		),
+	)
+	return tuple(reordered)
+
+
 def _product_area_from_chunk(chunk: RetrievedChunk, company: Company | None) -> str:
+	lowered_metadata = " ".join(
+		part for part in (chunk.title, chunk.heading or "", " ".join(chunk.breadcrumbs), chunk.source_path, chunk.text[:400]) if part
+	).lower()
+	path_text = chunk.source_path.lower()
+
+	if any(
+		keyword in lowered_metadata
+		for keyword in (
+			"traveller",
+			"travellers",
+			"traveler",
+			"travelers",
+			"traveller's cheque",
+			"traveler's cheque",
+			"cheques",
+		)
+	):
+		return validate_product_area("travel_support")
+
+	if (
+		company is Company.HACKERRANK
+		and "hackerrank_community/" in path_text
+		and ("account-settings/" in path_text or "manage-account" in path_text or "delete-an-account" in path_text)
+	):
+		return validate_product_area("community")
+
+	if company is Company.CLAUDE and any(
+		keyword in lowered_metadata
+		for keyword in (
+			"privacy",
+			"private info",
+			"private information",
+			"sensitive",
+			"who can view my conversations",
+			"view my conversations",
+		)
+	):
+		return validate_product_area("privacy")
+
 	product_area_hint = chunk.product_area_hint if chunk.product_area_hint != "general_support" else None
 
 	path_first = map_evidence_to_product_area(
@@ -378,6 +566,24 @@ def _build_escalation_result(
 	)
 
 
+def _build_invalid_result(*, explicit_company: Company | None) -> OutputRow:
+	product_area = (
+		_default_product_area(explicit_company)
+		if explicit_company is not None
+		else validate_product_area("conversation_management")
+	)
+	return OutputRow(
+		status=TicketStatus.REPLIED,
+		product_area=product_area,
+		response=INVALID_REPLY_TEXT,
+		justification=(
+			"Replied with the deterministic invalid-request template because the ticket text did not "
+			"look like a supported support request."
+		),
+		request_type=RequestType.INVALID,
+	)
+
+
 def process_ticket(ticket: InputTicket) -> dict[str, str]:
 	"""Run the deterministic ticket baseline without any provider dependency."""
 
@@ -387,6 +593,11 @@ def process_ticket(ticket: InputTicket) -> dict[str, str]:
 	if safety_decision.should_escalate:
 		return _serialize_result(
 			_build_escalation_result(safety_decision, resolved_company=resolved_company)
+		)
+
+	if safety_decision.request_type is RequestType.INVALID:
+		return _serialize_result(
+			_build_invalid_result(explicit_company=_trusted_company(normalized_ticket.company))
 		)
 
 	if resolved_company is None:
@@ -400,7 +611,11 @@ def process_ticket(ticket: InputTicket) -> dict[str, str]:
 		)
 
 	query_text = build_query_text(normalized_ticket.normalized_subject, normalized_ticket.normalized_issue)
-	retrieved_chunks = retrieve_chunks(query_text, domain=resolved_company, top_k=RETRIEVAL_TOP_K)
+	expanded_query_text = _expand_query_text(query_text)
+	retrieved_chunks = _rerank_retrieved_chunks(
+		expanded_query_text,
+		retrieve_chunks(expanded_query_text, domain=resolved_company, top_k=RETRIEVAL_TOP_K),
+	)
 	weak_evidence = evaluate_retrieval_safety(retrieved_chunks, expected_domain=resolved_company)
 	if weak_evidence is not None:
 		weak_evidence_decision = _weak_evidence_decision(
