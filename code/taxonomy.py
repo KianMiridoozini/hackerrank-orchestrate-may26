@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Final, Iterable, Sequence
 
 from config import DATA_ROOT, DEFAULT_ENCODING, SAMPLE_TICKETS_PATH
-from schemas import Company
+from schemas import Company, RetrievedChunk
 
 
 NORMALIZE_PATTERN: Final[re.Pattern[str]] = re.compile(r"[^a-z0-9]+")
@@ -219,3 +219,82 @@ def map_evidence_to_product_area(
 		if canonical and canonical in active_taxonomy.allowed_labels:
 			return canonical
 	return validate_product_area(default, active_taxonomy)
+
+
+def default_product_area_for_company(company: Company | None) -> str:
+	"""Return the default broad product area for a resolved company."""
+
+	return validate_product_area(
+		map_evidence_to_product_area(company=company, default="general_support")
+	)
+
+
+def map_retrieved_chunk_to_product_area(chunk: RetrievedChunk, company: Company | None) -> str:
+	"""Map a retrieved chunk to the final product-area label with local override rules."""
+
+	lowered_metadata = " ".join(
+		part for part in (chunk.title, chunk.heading or "", " ".join(chunk.breadcrumbs), chunk.source_path, chunk.text[:400]) if part
+	).lower()
+	path_text = chunk.source_path.lower()
+
+	if any(
+		keyword in lowered_metadata
+		for keyword in (
+			"traveller",
+			"travellers",
+			"traveler",
+			"travelers",
+			"traveller's cheque",
+			"traveler's cheque",
+			"cheques",
+		)
+	):
+		return validate_product_area("travel_support")
+
+	if (
+		company is Company.HACKERRANK
+		and "hackerrank_community/" in path_text
+		and ("account-settings/" in path_text or "manage-account" in path_text or "delete-an-account" in path_text)
+	):
+		return validate_product_area("community")
+
+	if company is Company.CLAUDE and any(
+		keyword in lowered_metadata
+		for keyword in (
+			"privacy",
+			"private info",
+			"private information",
+			"sensitive",
+			"who can view my conversations",
+			"view my conversations",
+		)
+	):
+		return validate_product_area("privacy")
+
+	product_area_hint = chunk.product_area_hint if chunk.product_area_hint != "general_support" else None
+
+	path_first = map_evidence_to_product_area(
+		source_path=chunk.source_path,
+		product_area_hint=product_area_hint,
+		default="general_support",
+	)
+	if path_first != "general_support":
+		return validate_product_area(path_first)
+
+	breadcrumb_first = map_evidence_to_product_area(
+		breadcrumbs=tuple(reversed(chunk.breadcrumbs)),
+		product_area_hint=product_area_hint,
+		default="general_support",
+	)
+	if breadcrumb_first != "general_support":
+		return validate_product_area(breadcrumb_first)
+
+	return validate_product_area(
+		map_evidence_to_product_area(
+			breadcrumbs=chunk.breadcrumbs,
+			source_path=chunk.source_path,
+			product_area_hint=product_area_hint,
+			company=company,
+			default="general_support",
+		)
+	)

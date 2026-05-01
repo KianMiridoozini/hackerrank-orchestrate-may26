@@ -53,6 +53,8 @@ Current focus: `Step 19 is verified. The repo now adds only a narrow concept-lev
 
 Current recommended next action: `Start Step 20 and write code/README.md while the architecture, validation commands, and current limitations are now stable enough to document clearly.`
 
+Behavior-preserving refactor status: `A small post-Step-19 modularity refactor is verified as behavior-preserving. It extracted retrieval policy helpers into code/retrieval_policy.py, moved higher-level retrieved-chunk product-area mapping into code/taxonomy.py, moved reply/escalation output builders into code/response_builder.py, and reduced code/agent.py to orchestration plus serialization. Baseline behavior matched post-refactor behavior: evaluate_sample.py stayed at zero categorical mismatches, the production batch still wrote 29 rows, and written categorical values remained valid.`
+
 ---
 
 ## Milestones
@@ -514,3 +516,12 @@ Append short project-state updates here when useful. Do not use this as a replac
 - Agent: `GitHub Copilot`
 - Summary: `Step 19 added only a narrow concept-level semantic reranking signal over the existing top BM25 candidates after a targeted paraphrase probe exposed one real Claude retrieval-ranking miss for private-chat deletion wording.`
 - Evidence: `The follow-up paraphrase probe passed on six representative cases, c:/Users/kianj/OneDrive/Documents/HackerRank/May26/.venv/Scripts/python.exe evaluate_sample.py stayed clean at 10/10 status, 10/10 request_type, and 8/8 product_area, and c:/Users/kianj/OneDrive/Documents/HackerRank/May26/.venv/Scripts/python.exe manual_regressions.py still passed 9/9 cases.`
+
+### Update 17
+
+- Timestamp: `2026-05-01T20:10:37+02:00`
+- Agent: `GitHub Copilot`
+- Summary: `A small behavior-preserving modularity refactor extracted retrieval-policy helpers into code/retrieval_policy.py, moved higher-level retrieved-chunk product-area mapping into code/taxonomy.py, moved reply and escalation output builders into code/response_builder.py, and reduced code/agent.py to orchestration plus serialization only.`
+- Files touched: `code/agent.py`, `code/retrieval_policy.py`, `code/response_builder.py`, `code/taxonomy.py`, `implementation-status.md`
+- Behavior change: `None intended and none observed in the recorded checks.`
+- Evidence: `Pre-edit baseline: c:/Users/kianj/OneDrive/Documents/HackerRank/May26/.venv/Scripts/python.exe evaluate_sample.py reported 10/10 status, 10/10 request_type, and 8/8 product_area with no mismatches; c:/Users/kianj/OneDrive/Documents/HackerRank/May26/.venv/Scripts/python.exe main.py --output ../support_tickets/output.csv wrote 29 rows; a follow-up CSV check reported rows=29 with no invalid status rows, no invalid request_type rows, and no blank product_area rows. Post-refactor: the same evaluate_sample.py run still reported no mismatches, main.py still wrote 29 rows, the same CSV validity check still reported rows=29 with no invalid categorical rows or blank product_area rows, and manual_regressions.py still passed 9/9.`
