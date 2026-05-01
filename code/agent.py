@@ -7,19 +7,26 @@ from collections import Counter
 from typing import Final
 
 from retriever import build_query_text, retrieve_chunks
-from schemas import Company, InputTicket, NormalizedTicket, OutputRow, RequestType, TicketStatus
+from safety import assess_ticket_safety, build_escalation_response, evaluate_retrieval_safety
+from schemas import (
+	Company,
+	EscalationCategory,
+	InputTicket,
+	NormalizedTicket,
+	OutputRow,
+	RequestType,
+	RetrievedChunk,
+	SafetyDecision,
+	TicketStatus,
+)
+from taxonomy import map_evidence_to_product_area, validate_product_area
 
 
-PLACEHOLDER_RESPONSE = (
-	"Thanks for your message. This placeholder batch run confirms the CSV pipeline "
-	"only. Grounded routing and support answers will be added in later steps."
-)
-PLACEHOLDER_JUSTIFICATION = (
-	"Placeholder agent flow used for Step 4 before safety rules, retrieval, and "
-	"product-area mapping are implemented."
-)
 WHITESPACE_PATTERN: Final[re.Pattern[str]] = re.compile(r"\s+")
 TOKEN_PATTERN: Final[re.Pattern[str]] = re.compile(r"[a-z0-9]+")
+RETRIEVAL_TOP_K: Final[int] = 3
+MAX_REPLY_LINES: Final[int] = 3
+MAX_REPLY_CHARS: Final[int] = 480
 DOMAIN_KEYWORDS: Final[dict[Company, tuple[str, ...]]] = {
 	Company.CLAUDE: (
 		"claude",
@@ -214,25 +221,131 @@ def detect_ticket_domain(ticket: InputTicket | NormalizedTicket) -> Company | No
 
 
 def _default_product_area(company: Company | None) -> str:
-	if company is not None:
-		return company.value
-	return "General Support"
-
-
-def process_ticket(ticket: InputTicket) -> dict[str, str]:
-	"""Return a structurally valid placeholder result for one input ticket."""
-
-	normalized_ticket = normalize_ticket(ticket)
-	resolved_company = normalized_ticket.detected_company or _trusted_company(normalized_ticket.company)
-
-	result = OutputRow(
-		status=TicketStatus.REPLIED,
-		product_area=_default_product_area(resolved_company),
-		response=PLACEHOLDER_RESPONSE,
-		justification=PLACEHOLDER_JUSTIFICATION,
-		request_type=RequestType.PRODUCT_ISSUE,
+	return validate_product_area(
+		map_evidence_to_product_area(company=company, default="general_support")
 	)
 
+
+def _product_area_from_chunk(chunk: RetrievedChunk, company: Company | None) -> str:
+	product_area_hint = chunk.product_area_hint if chunk.product_area_hint != "general_support" else None
+
+	path_first = map_evidence_to_product_area(
+		source_path=chunk.source_path,
+		product_area_hint=product_area_hint,
+		default="general_support",
+	)
+	if path_first != "general_support":
+		return validate_product_area(path_first)
+
+	breadcrumb_first = map_evidence_to_product_area(
+		breadcrumbs=tuple(reversed(chunk.breadcrumbs)),
+		product_area_hint=product_area_hint,
+		default="general_support",
+	)
+	if breadcrumb_first != "general_support":
+		return validate_product_area(breadcrumb_first)
+
+	return validate_product_area(
+		map_evidence_to_product_area(
+			breadcrumbs=chunk.breadcrumbs,
+			source_path=chunk.source_path,
+			product_area_hint=product_area_hint,
+			company=company,
+			default="general_support",
+		)
+	)
+
+
+def _build_chunk_excerpt(chunk: RetrievedChunk) -> str:
+	label_candidates = {chunk.title.lower()}
+	if chunk.heading:
+		label_candidates.add(chunk.heading.lower())
+
+	selected_lines: list[str] = []
+	seen_lines: set[str] = set()
+	for raw_line in chunk.text.splitlines():
+		line = WHITESPACE_PATTERN.sub(" ", raw_line.strip())
+		if not line:
+			continue
+		if line.lower() in label_candidates:
+			continue
+		if line in seen_lines:
+			continue
+		selected_lines.append(line)
+		seen_lines.add(line)
+		if len(selected_lines) >= MAX_REPLY_LINES:
+			break
+
+	excerpt = " ".join(selected_lines) if selected_lines else WHITESPACE_PATTERN.sub(" ", chunk.text.strip())
+	if len(excerpt) <= MAX_REPLY_CHARS:
+		return excerpt
+	truncated = excerpt[:MAX_REPLY_CHARS].rsplit(" ", 1)[0].rstrip(" ,;:")
+	return f"{truncated}..." if truncated else excerpt[:MAX_REPLY_CHARS]
+
+
+def _build_replied_response(chunk: RetrievedChunk) -> str:
+	excerpt = _build_chunk_excerpt(chunk)
+	if excerpt:
+		return excerpt
+	label = chunk.heading or chunk.title
+	return f"The most relevant support guidance I found is in {label}."
+
+
+def _build_replied_justification(
+	chunk: RetrievedChunk,
+	*,
+	product_area: str,
+	resolved_company: Company | None,
+) -> str:
+	heading_text = f", heading={chunk.heading!r}" if chunk.heading else ""
+	company_text = resolved_company.value if resolved_company is not None else "unresolved"
+	score_text = f"{(chunk.score or 0.0):.2f}"
+	return (
+		f"Replied from retrieved support evidence in {chunk.source_path} "
+		f"(title={chunk.title!r}{heading_text}, rank={chunk.rank}, score={score_text}); "
+		f"resolved_company={company_text}; product_area={product_area}."
+	)
+
+
+def _build_escalation_justification(
+	decision: SafetyDecision,
+	*,
+	product_area: str,
+	resolved_company: Company | None,
+	top_chunk: RetrievedChunk | None = None,
+) -> str:
+	category = decision.category.value if decision.category is not None else "unknown"
+	matched_rules = ", ".join(decision.matched_rules) if decision.matched_rules else "none"
+	company_text = resolved_company.value if resolved_company is not None else "unresolved"
+	base = (
+		f"Escalated by deterministic rule {category} ({matched_rules}); "
+		f"resolved_company={company_text}; product_area={product_area}."
+	)
+	if top_chunk is None:
+		return base
+	score_text = f"{(top_chunk.score or 0.0):.2f}"
+	return (
+		f"{base} Top retrieved evidence was {top_chunk.source_path} "
+		f"(rank={top_chunk.rank}, score={score_text})."
+	)
+
+
+def _weak_evidence_decision(
+	*,
+	reason: str,
+	request_type: RequestType,
+	matched_rules: tuple[str, ...],
+) -> SafetyDecision:
+	return SafetyDecision(
+		should_escalate=True,
+		category=EscalationCategory.WEAK_EVIDENCE,
+		reason=reason,
+		request_type=request_type,
+		matched_rules=matched_rules,
+	)
+
+
+def _serialize_result(result: OutputRow) -> dict[str, str]:
 	return {
 		"status": result.status.value,
 		"product_area": result.product_area,
@@ -240,3 +353,82 @@ def process_ticket(ticket: InputTicket) -> dict[str, str]:
 		"justification": result.justification,
 		"request_type": result.request_type.value,
 	}
+
+
+def _build_escalation_result(
+	decision: SafetyDecision,
+	*,
+	resolved_company: Company | None,
+	top_chunk: RetrievedChunk | None = None,
+) -> OutputRow:
+	product_area = _default_product_area(resolved_company)
+	if top_chunk is not None:
+		product_area = _product_area_from_chunk(top_chunk, resolved_company)
+	return OutputRow(
+		status=TicketStatus.ESCALATED,
+		product_area=product_area,
+		response=build_escalation_response(decision.category, company=resolved_company),
+		justification=_build_escalation_justification(
+			decision,
+			product_area=product_area,
+			resolved_company=resolved_company,
+			top_chunk=top_chunk,
+		),
+		request_type=decision.request_type,
+	)
+
+
+def process_ticket(ticket: InputTicket) -> dict[str, str]:
+	"""Run the deterministic ticket baseline without any provider dependency."""
+
+	normalized_ticket = normalize_ticket(ticket)
+	resolved_company = normalized_ticket.detected_company or _trusted_company(normalized_ticket.company)
+	safety_decision = assess_ticket_safety(normalized_ticket)
+	if safety_decision.should_escalate:
+		return _serialize_result(
+			_build_escalation_result(safety_decision, resolved_company=resolved_company)
+		)
+
+	if resolved_company is None:
+		unresolved_domain_decision = _weak_evidence_decision(
+			reason="Ticket domain could not be resolved conservatively from the available ticket fields.",
+			request_type=safety_decision.request_type,
+			matched_rules=("unresolved_domain",),
+		)
+		return _serialize_result(
+			_build_escalation_result(unresolved_domain_decision, resolved_company=resolved_company)
+		)
+
+	query_text = build_query_text(normalized_ticket.normalized_subject, normalized_ticket.normalized_issue)
+	retrieved_chunks = retrieve_chunks(query_text, domain=resolved_company, top_k=RETRIEVAL_TOP_K)
+	weak_evidence = evaluate_retrieval_safety(retrieved_chunks, expected_domain=resolved_company)
+	if weak_evidence is not None:
+		weak_evidence_decision = _weak_evidence_decision(
+			reason=weak_evidence.reason,
+			request_type=safety_decision.request_type,
+			matched_rules=weak_evidence.matched_rules,
+		)
+		return _serialize_result(
+			_build_escalation_result(
+				weak_evidence_decision,
+				resolved_company=resolved_company,
+				top_chunk=retrieved_chunks[0] if retrieved_chunks else None,
+			)
+		)
+
+	top_chunk = retrieved_chunks[0]
+	product_area = _product_area_from_chunk(top_chunk, resolved_company)
+
+	result = OutputRow(
+		status=TicketStatus.REPLIED,
+		product_area=product_area,
+		response=_build_replied_response(top_chunk),
+		justification=_build_replied_justification(
+			top_chunk,
+			product_area=product_area,
+			resolved_company=resolved_company,
+		),
+		request_type=safety_decision.request_type,
+	)
+
+	return _serialize_result(result)

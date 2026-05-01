@@ -22,6 +22,16 @@ REQUIRED_SAMPLE_COLUMNS: tuple[str, ...] = (
 	"Status",
 	"Request Type",
 )
+SUBMISSION_OUTPUT_COLUMNS: tuple[str, ...] = (
+	"issue",
+	"subject",
+	"company",
+	"response",
+	"product_area",
+	"status",
+	"request_type",
+	"justification",
+)
 
 REQUIRED_INPUT_COLUMNS: tuple[str, ...] = (
 	"Issue",
@@ -41,8 +51,8 @@ def _stringify(value: object) -> str:
 
 
 @lru_cache(maxsize=1)
-def load_output_header(sample_path: Path = SAMPLE_TICKETS_PATH) -> tuple[str, ...]:
-	"""Read the sample CSV header and preserve its exact column order."""
+def load_sample_header(sample_path: Path = SAMPLE_TICKETS_PATH) -> tuple[str, ...]:
+	"""Read the sample CSV header so evaluation logic can inspect it later."""
 
 	try:
 		with sample_path.open("r", encoding=DEFAULT_ENCODING, newline="") as handle:
@@ -79,6 +89,12 @@ def load_output_header(sample_path: Path = SAMPLE_TICKETS_PATH) -> tuple[str, ..
 	return header
 
 
+def load_output_header() -> tuple[str, ...]:
+	"""Return the fixed submission output schema required by the challenge."""
+
+	return SUBMISSION_OUTPUT_COLUMNS
+
+
 def align_row_to_output_header(
 	row: Mapping[str, object],
 	output_header: Sequence[str],
@@ -106,9 +122,10 @@ def write_output_csv(
 	output_path: Path = OUTPUT_TICKETS_PATH,
 	sample_path: Path = SAMPLE_TICKETS_PATH,
 ) -> Path:
-	"""Write output rows using the exact column order defined by the sample CSV."""
+	"""Write output rows using the required submission schema."""
 
-	output_header = load_output_header(sample_path)
+	load_sample_header(sample_path)
+	output_header = load_output_header()
 	output_path.parent.mkdir(parents=True, exist_ok=True)
 
 	with output_path.open("w", encoding=DEFAULT_ENCODING, newline="") as handle:
@@ -158,11 +175,15 @@ def load_input_tickets(input_path: Path = INPUT_TICKETS_PATH) -> list[InputTicke
 
 
 def build_output_rows(tickets: Sequence[InputTicket]) -> list[dict[str, object]]:
-	"""Run the placeholder agent flow for each ticket and preserve input columns."""
+	"""Run the ticket agent flow and emit normalized submission-row keys."""
 
 	rows: list[dict[str, object]] = []
 	for ticket in tickets:
-		output_row = dict(ticket.raw_row)
+		output_row = {
+			"issue": ticket.issue,
+			"subject": ticket.subject or "",
+			"company": ticket.company.value if ticket.company is not None else "",
+		}
 		output_row.update(process_ticket(ticket))
 		rows.append(output_row)
 	return rows
@@ -182,7 +203,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 	"""Run the minimal batch pipeline over the input CSV."""
 
 	args = parse_args(argv)
-	output_header = load_output_header(args.sample)
+	load_sample_header(args.sample)
+	output_header = load_output_header()
 	tickets = load_input_tickets(args.input)
 	rows = build_output_rows(tickets)
 	write_output_csv(rows, output_path=args.output, sample_path=args.sample)

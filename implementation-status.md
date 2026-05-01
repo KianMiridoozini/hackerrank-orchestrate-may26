@@ -49,9 +49,9 @@ Last updated: `VERIFIED`
 
 Updated by: `GitHub Copilot`
 
-Current focus: `Step 10 is verified: code/safety.py now applies deterministic escalation rules, fixed escalation templates, request-type heuristics, and weak-evidence checks.`
+Current focus: `Step 11 is verified and the submission CSV contract is corrected: code/agent.py still runs the deterministic baseline, and code/main.py now writes output.csv with justification included.`
 
-Current recommended next action: `Start Step 11: connect the deterministic baseline in code/agent.py by combining domain detection, safety gating, retrieval, product-area mapping, and deterministic output assembly.`
+Current recommended next action: `Start Step 12: add evaluate_sample.py to compare categorical outputs against the sample CSV.`
 
 ---
 
@@ -60,8 +60,8 @@ Current recommended next action: `Start Step 11: connect the deterministic basel
 | ID | Milestone | Status | Evidence | Notes |
 |---|---|---|---|---|
 | A | Batch skeleton works | VERIFIED | `python code/main.py --output ../support_tickets/output.step4.csv` ran without crashing after `pydantic` was installed in the workspace venv; the command resolved `support_tickets/`, loaded 29 tickets, and wrote 29 rows. A follow-up CSV check confirmed the output header matched the sample header exactly. | `support_tickets/output.step4.csv` was used as the validation artifact for the Step 4 batch skeleton. |
-| B | Corpus and taxonomy work | VERIFIED | `code/taxonomy.py` builds a 140-label allowed vocabulary from the sample CSV plus corpus folders and index breadcrumbs; `code/corpus.py` now discovers 773 markdown files, writes `code/.cache/corpus_cache.json`, and produces heading-aware chunk artifacts. Validation confirmed the April 2026 release notes file split into 66 chunks with heading context, a short Claude FAQ stayed as a single chunk, and manual inspection of `CorpusChunk` plus cache serialization preserved `source_path`, `title`, `breadcrumbs`, and `heading` provenance. | Retrieval itself is still pending, but the corpus and taxonomy gate described for Milestone B now has concrete evidence. |
-| C | Deterministic baseline works | NOT_STARTED | - | Agent can route, retrieve, escalate, and emit complete outputs without any LLM/provider dependency. |
+| B | Corpus and taxonomy work | VERIFIED | `code/taxonomy.py` builds a 140-label allowed vocabulary from the sample CSV plus corpus folders and index breadcrumbs; `code/corpus.py` now discovers 773 markdown files, writes `code/.cache/corpus_cache.json`, and produces heading-aware chunk artifacts. Validation confirmed the April 2026 release notes file split into 66 chunks with heading context, a short Claude FAQ stayed as a single chunk, and manual inspection of `CorpusChunk` plus cache serialization preserved `source_path`, `title`, `breadcrumbs`, and `heading` provenance. | This milestone remains the deterministic retrieval foundation now used by the Step 11 baseline. |
+| C | Deterministic baseline works | VERIFIED | `code/agent.py` now normalizes tickets, resolves domain conservatively, applies deterministic safety rules, escalates unresolved or weak-evidence cases, retrieves domain-filtered corpus evidence, maps `product_area` from specific source-path and breadcrumb evidence, and assembles deterministic replies from retrieved chunks. Validation confirmed a conversation-management query replied from the Claude FAQ with traceable evidence, a Visa fraud ticket escalated immediately, a generic unresolved account-help ticket escalated as weak evidence, and `main.py` now writes `support_tickets/output.csv` with the required lowercase submission columns including `justification`; the latest batch validation wrote 29 rows without any provider key and confirmed no written row was missing `status`, `product_area`, `response`, `request_type`, or `justification`. | The deterministic baseline now runs end to end without any LLM or provider dependency, and its written CSV contract matches the required justification-bearing submission format. |
 | D | Sample evaluation is informative | NOT_STARTED | - | `evaluate_sample.py` reports categorical mismatches clearly. |
 | E | Optional LLM layer is additive | NOT_STARTED | - | Provider-backed synthesis improves safe replies without weakening categorical consistency or safety. |
 | F | Submission-ready run works | NOT_STARTED | - | Production CSV completes successfully, repeats reproducibly, and the submission checklist is satisfied. |
@@ -170,7 +170,7 @@ Can be marked `VERIFIED` only when:
 | 8 | Implement lexical retrieval | VERIFIED | `implementation-status.md`, `code/retriever.py` | A Python validation snippet built the BM25 index over `4788` cached chunks, confirmed a Claude conversation-management query returned only Claude-domain results and ranked `claude/claude/conversation-management/8230524-how-can-i-delete-or-rename-a-conversation.md` first, and confirmed a HackerRank release-notes query returned only HackerRank-domain results and ranked the matching release-notes heading chunk first with populated title, breadcrumbs, source path, score, and rank. | Start Step 9: implement conservative domain detection. |
 | 9 | Implement domain detection | VERIFIED | `implementation-status.md`, `code/agent.py` | A Python validation snippet confirmed an explicit Visa company value was trusted immediately, representative missing-company Claude and HackerRank tickets resolved to `Company.CLAUDE` and `Company.HACKERRANK`, `normalize_ticket()` populated `detected_company` for the Claude example, and an ambiguous generic account-help ticket stayed unresolved instead of guessing. | Start Step 10: implement deterministic safety rules and request-type heuristics. |
 | 10 | Implement safety and `request_type` rules | VERIFIED | `implementation-status.md`, `code/safety.py` | A Python validation snippet confirmed fraud, account-access restoration, assessment-integrity, outage, malicious prompt-injection, feature-request, and weak-evidence examples all mapped to the expected deterministic `SafetyDecision` outcomes; outage mapped to `RequestType.BUG`, malicious content mapped to `RequestType.INVALID`, feature requests stayed non-escalated with `RequestType.FEATURE_REQUEST`, and `build_escalation_response()` returned a fixed template for an escalation category. | Start Step 11: connect the deterministic baseline in `code/agent.py`. |
-| 11 | Connect deterministic baseline | NOT_STARTED | - | - | Route, retrieve, escalate, map product area, and emit complete rows without LLM. |
+| 11 | Connect deterministic baseline | VERIFIED | `implementation-status.md`, `code/agent.py`, `code/main.py`, `support_tickets/output.csv` | A Python validation snippet confirmed a known Claude conversation-management query replied with `product_area=conversation_management` and traceable retrieved evidence, a Visa fraud ticket escalated immediately via the deterministic fraud rule, and an ambiguous generic account-help ticket escalated as weak evidence; the first reply-path validation exposed overly broad product-area mapping, which was repaired by preferring source-path and specific breadcrumb evidence before rerunning the same check successfully. A follow-up contract fix in `code/main.py` separated sample-header validation from the submission writer schema so `main()` now writes `support_tickets/output.csv` with lowercase columns including `justification`; the latest batch validation wrote 29 rows, confirmed only valid `status` and `request_type` values, and confirmed no written or in-memory row was missing `product_area`, `response`, `request_type`, or `justification`. | Start Step 12: add the sample evaluator. |
 | 12 | Add sample evaluator | NOT_STARTED | - | - | Compare categorical outputs against sample. |
 | 13 | Tune deterministic baseline | NOT_STARTED | - | - | Fix structural routing, safety, taxonomy, and retrieval failures. |
 | 14 | Add optional LLM wrapper | NOT_STARTED | - | - | Add env-based provider wrapper, temperature 0, strict JSON, and one retry. |
@@ -348,6 +348,7 @@ Use this checklist during the final hardening pass.
 | Keep LLM optional and additive | Core routing, safety, taxonomy, retrieval, and CSV writing should not depend on model behavior. | TBD | `plan-overview.md`, `implementation-sequence.md` |
 | Do not build transcript logging into the triage app | Transcript logging is an external AI-tool submission artifact, not part of ticket triage. | TBD | `AGENTS.md`, `README.md` |
 | Prefer escalation when confidence is low | The challenge penalizes hallucinated policies and unsupported answers. | TBD | `problem_statement.md`, `evalutation_criteria.md` |
+| Use a dedicated submission output schema instead of mirroring the sample header exactly | `problem_statement.md`, `evalutation_criteria.md`, `README.md`, and the provided `support_tickets/output.csv` template all require `justification`, while `sample_support_tickets.csv` omits it. The sample file remains useful for evaluation, but the final writer must target the submission schema. | 2026-05-01 | `problem_statement.md`, `evalutation_criteria.md`, `support_tickets/output.csv`, `code/main.py` |
 
 ---
 
@@ -477,3 +478,17 @@ Append short project-state updates here when useful. Do not use this as a replac
 - Agent: `GitHub Copilot`
 - Summary: `Step 10 filled code/safety.py with deterministic escalation rules, request-type heuristics, fixed escalation templates, and a weak-evidence helper for later retrieval gating.`
 - Evidence: `A Python validation snippet confirmed representative fraud, account restoration, assessment dispute, outage, malicious prompt-injection, feature-request, and weak-evidence conflict cases all mapped to the expected `SafetyDecision` results, and `build_escalation_response()` returned a fixed escalation template.`
+
+### Update 12
+
+- Timestamp: `2026-05-01T14:44:37.9969276+02:00`
+- Agent: `GitHub Copilot`
+- Summary: `Step 11 rewired code/agent.py into the deterministic baseline by combining domain detection, safety gating, domain-filtered retrieval, product-area mapping, and deterministic reply or escalation assembly.`
+- Evidence: `A Python validation snippet confirmed one grounded FAQ reply, one fraud escalation, and one unresolved-domain escalation; a local product-area mapping defect was repaired immediately and the same check then passed. A follow-up batch validation wrote 29 rows to support_tickets/output.step11.csv with valid statuses and request types, and a separate in-memory check confirmed all 29 rows had non-empty status, product_area, response, justification, and request_type fields.`
+
+### Update 13
+
+- Timestamp: `2026-05-01T15:07:29.1436388+02:00`
+- Agent: `GitHub Copilot`
+- Summary: `The submission CSV contract was corrected so code/main.py now validates the sample header separately but writes support_tickets/output.csv with the required lowercase columns including justification.`
+- Evidence: `get_errors reported no issues in code/main.py; a Python validation snippet confirmed the sample header still loads unchanged, the submission output header is now issue/subject/company/response/product_area/status/request_type/justification, main() wrote 29 rows to support_tickets/output.csv, and no written or in-memory row was missing response, product_area, status, request_type, or justification.`
