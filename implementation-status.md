@@ -49,9 +49,9 @@ Last updated: `VERIFIED`
 
 Updated by: `GitHub Copilot`
 
-Current focus: `Step 8 is verified: code/retriever.py now builds a BM25 index over cached corpus chunks, filters by domain, and returns provenance-preserving retrieval results.`
+Current focus: `Step 9 is verified: code/agent.py now normalizes ticket text, trusts explicit company values, and uses conservative retrieval-backed fallback only for specific missing-company queries.`
 
-Current recommended next action: `Start Step 9: implement conservative domain detection in code/agent.py using company first and retrieval-backed fallback second.`
+Current recommended next action: `Start Step 10: implement deterministic safety rules and request-type heuristics in code/safety.py.`
 
 ---
 
@@ -168,7 +168,7 @@ Can be marked `VERIFIED` only when:
 | 6 | Build corpus parser | VERIFIED | `implementation-status.md`, `code/corpus.py` | `get_errors` initially showed no editor issues, then a Python validation snippet caught and helped confirm a regex syntax fix; the rerun discovered 773 markdown files, parsed `data/claude/claude/features-and-capabilities/14465370-use-claude-for-word.md` with title `Use Claude for Word` and breadcrumbs `('Claude', 'Features and capabilities')`, flagged `data/claude/index.md` as `navigation_index`, and flagged `data/visa/support/consumer/checkout-fees-contact-form.md` as `short_stub`. | Start Step 7: add heading-aware chunking. |
 | 7 | Add heading-aware chunking | VERIFIED | `implementation-status.md`, `code/corpus.py`, `code/.cache/corpus_cache.json` | `get_errors` surfaced one local syntax issue which was repaired immediately; Python validation then confirmed the April 2026 release notes file split into 66 chunks with heading context, the Claude conversation-management FAQ stayed as one chunk, `code/.cache/corpus_cache.json` existed after the first build, and repeated artifact loads returned the same record and chunk counts (`773` records, `4788` chunks). | Start Step 8: implement lexical retrieval. |
 | 8 | Implement lexical retrieval | VERIFIED | `implementation-status.md`, `code/retriever.py` | A Python validation snippet built the BM25 index over `4788` cached chunks, confirmed a Claude conversation-management query returned only Claude-domain results and ranked `claude/claude/conversation-management/8230524-how-can-i-delete-or-rename-a-conversation.md` first, and confirmed a HackerRank release-notes query returned only HackerRank-domain results and ranked the matching release-notes heading chunk first with populated title, breadcrumbs, source path, score, and rank. | Start Step 9: implement conservative domain detection. |
-| 9 | Implement domain detection | NOT_STARTED | - | - | Trust `company` when plausible; infer cautiously when missing. |
+| 9 | Implement domain detection | VERIFIED | `implementation-status.md`, `code/agent.py` | A Python validation snippet confirmed an explicit Visa company value was trusted immediately, representative missing-company Claude and HackerRank tickets resolved to `Company.CLAUDE` and `Company.HACKERRANK`, `normalize_ticket()` populated `detected_company` for the Claude example, and an ambiguous generic account-help ticket stayed unresolved instead of guessing. | Start Step 10: implement deterministic safety rules and request-type heuristics. |
 | 10 | Implement safety and `request_type` rules | NOT_STARTED | - | - | Add deterministic escalation categories and request heuristics. |
 | 11 | Connect deterministic baseline | NOT_STARTED | - | - | Route, retrieve, escalate, map product area, and emit complete rows without LLM. |
 | 12 | Add sample evaluator | NOT_STARTED | - | - | Compare categorical outputs against sample. |
@@ -463,3 +463,10 @@ Append short project-state updates here when useful. Do not use this as a replac
 - Agent: `GitHub Copilot`
 - Summary: `Step 8 filled code/retriever.py with BM25 retrieval over cached corpus chunks, including domain filtering and provenance-preserving RetrievedChunk results.`
 - Evidence: `A Python validation snippet built the BM25 index over 4788 chunks, kept a Claude conversation-management query fully inside the Claude domain while ranking the delete-or-rename FAQ first, and kept a HackerRank release-notes query fully inside the HackerRank domain while ranking the matching heading chunk first with title, breadcrumbs, source path, score, and rank populated.`
+
+### Update 10
+
+- Timestamp: `2026-05-01T14:21:28.9859839+02:00`
+- Agent: `GitHub Copilot`
+- Summary: `Step 9 updated code/agent.py with ticket normalization plus conservative domain detection that trusts explicit company values and only falls back to retrieval for specific missing-company queries.`
+- Evidence: `A Python validation snippet confirmed an explicit Visa ticket stayed Visa, representative missing-company Claude and HackerRank queries resolved correctly, `normalize_ticket()` populated `detected_company` for the Claude example, and a generic account-help query stayed unresolved after the retrieval threshold was tightened.`
