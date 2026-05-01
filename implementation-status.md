@@ -49,9 +49,9 @@ Last updated: `VERIFIED`
 
 Updated by: `GitHub Copilot`
 
-Current focus: `Step 4 is verified: the CLI now reads the input CSV, runs a placeholder agent flow for each row, and writes a structurally valid output CSV.`
+Current focus: `Step 5 is verified: the product-area taxonomy now seeds from the sample labels and extends with corpus-derived labels and aliases.`
 
-Current recommended next action: `Start Step 5: build the taxonomy module from sample labels and corpus structure.`
+Current recommended next action: `Start Step 6: build the corpus parser to scan markdown files, normalize text, and mark stub pages.`
 
 ---
 
@@ -60,7 +60,7 @@ Current recommended next action: `Start Step 5: build the taxonomy module from s
 | ID | Milestone | Status | Evidence | Notes |
 |---|---|---|---|---|
 | A | Batch skeleton works | VERIFIED | `python code/main.py --output ../support_tickets/output.step4.csv` ran without crashing after `pydantic` was installed in the workspace venv; the command resolved `support_tickets/`, loaded 29 tickets, and wrote 29 rows. A follow-up CSV check confirmed the output header matched the sample header exactly. | `support_tickets/output.step4.csv` was used as the validation artifact for the Step 4 batch skeleton. |
-| B | Corpus and taxonomy work | NOT_STARTED | - | Corpus records/chunks build successfully and `product_area` values can be validated. |
+| B | Corpus and taxonomy work | IN_PROGRESS | `code/taxonomy.py` now builds a 140-label allowed vocabulary from the sample CSV plus corpus folders and index breadcrumbs; validation accepts the six sample labels, rejects unknown labels, and maps example evidence paths to `conversation_management`, `travel_support`, and `community`. | Corpus parsing, chunking, and retrieval provenance are still pending, so the milestone is not yet complete. |
 | C | Deterministic baseline works | NOT_STARTED | - | Agent can route, retrieve, escalate, and emit complete outputs without any LLM/provider dependency. |
 | D | Sample evaluation is informative | NOT_STARTED | - | `evaluate_sample.py` reports categorical mismatches clearly. |
 | E | Optional LLM layer is additive | NOT_STARTED | - | Provider-backed synthesis improves safe replies without weakening categorical consistency or safety. |
@@ -164,7 +164,7 @@ Can be marked `VERIFIED` only when:
 | 2 | Define config and schema boundaries | VERIFIED | `implementation-status.md`, `code/config.py`, `code/schemas.py` | `get_errors` reported no issues in `code/config.py` and `code/schemas.py`, and `python -c "import config, schemas; print('ok')"` returned `ok` from `code/` using the configured interpreter. | Start Step 3: inspect the sample header and implement the CSV writer contract. |
 | 3 | Inspect sample header and implement CSV writer | VERIFIED | `implementation-status.md`, `code/main.py` | `get_errors` reported no issues in `code/main.py`; a Python snippet loaded the real sample header, wrote a temporary CSV, and confirmed the first line matched `Issue,Subject,Company,Response,Product Area,Status,Request Type`; `main()` returned `0` and printed that same header. | Start Step 4: build the CLI skeleton and placeholder agent flow. |
 | 4 | Build CLI skeleton and placeholder agent flow | VERIFIED | `implementation-status.md`, `code/main.py`, `code/agent.py`, `support_tickets/output.step4.csv` | `get_errors` reported no issues in `code/main.py` and `code/agent.py`; `python main.py --output ../support_tickets/output.step4.csv` resolved `support_tickets/`, loaded 29 tickets, and wrote 29 rows; a follow-up CSV check confirmed `support_tickets/output.step4.csv` had 29 rows and the exact sample header. | Start Step 5: build the taxonomy module. |
-| 5 | Build taxonomy module | NOT_STARTED | - | - | Seed product areas from sample labels and corpus taxonomy. |
+| 5 | Build taxonomy module | VERIFIED | `implementation-status.md`, `code/taxonomy.py` | `get_errors` reported no issues in `code/taxonomy.py`; a Python validation snippet confirmed the six sample labels were present, `validate_product_area("screen")` succeeded, `validate_product_area("totally_unknown_label")` raised a `ValueError`, and evidence mapping resolved example paths to `conversation_management`, `travel_support`, and `community`. | Start Step 6: build the corpus parser. |
 | 6 | Build corpus parser | NOT_STARTED | - | - | Scan markdown, parse metadata, normalize text, and detect stubs. |
 | 7 | Add heading-aware chunking | NOT_STARTED | - | - | Split only long files by headings; keep short FAQ docs whole. |
 | 8 | Implement lexical retrieval | NOT_STARTED | - | - | Add TF-IDF or BM25 retrieval with domain filtering and provenance. |
@@ -435,3 +435,10 @@ Append short project-state updates here when useful. Do not use this as a replac
 - Agent: `GitHub Copilot`
 - Summary: `Step 4 added a minimal batch CLI in code/main.py and a placeholder per-ticket flow in code/agent.py so the pipeline can read the input CSV and write structurally valid output rows.`
 - Evidence: `The CLI command loaded 29 tickets from support_tickets/support_tickets.csv and wrote 29 rows to support_tickets/output.step4.csv, then a follow-up CSV check confirmed the output header matched the sample header exactly.`
+
+### Update 6
+
+- Timestamp: `2026-05-01T13:03:37.3383255+02:00`
+- Agent: `GitHub Copilot`
+- Summary: `Step 5 added code/taxonomy.py to seed allowed product-area labels from the sample CSV and extend them with corpus-derived labels and aliases from the data indexes and folder structure.`
+- Evidence: `get_errors reported no issues in code/taxonomy.py, and a Python validation snippet confirmed the sample labels were included, unknown labels were rejected, and representative evidence paths mapped to canonical labels.`
