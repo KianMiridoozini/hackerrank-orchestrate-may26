@@ -49,9 +49,9 @@ Last updated: `VERIFIED`
 
 Updated by: `GitHub Copilot`
 
-Current focus: `Step 5 is verified: the product-area taxonomy now seeds from the sample labels and extends with corpus-derived labels and aliases.`
+Current focus: `Step 6 is verified: code/corpus.py now discovers markdown files, parses frontmatter, normalizes body text, and marks non-answer-bearing pages.`
 
-Current recommended next action: `Start Step 6: build the corpus parser to scan markdown files, normalize text, and mark stub pages.`
+Current recommended next action: `Start Step 7: add heading-aware chunking for long documents while keeping short FAQ-style pages whole.`
 
 ---
 
@@ -60,7 +60,7 @@ Current recommended next action: `Start Step 6: build the corpus parser to scan 
 | ID | Milestone | Status | Evidence | Notes |
 |---|---|---|---|---|
 | A | Batch skeleton works | VERIFIED | `python code/main.py --output ../support_tickets/output.step4.csv` ran without crashing after `pydantic` was installed in the workspace venv; the command resolved `support_tickets/`, loaded 29 tickets, and wrote 29 rows. A follow-up CSV check confirmed the output header matched the sample header exactly. | `support_tickets/output.step4.csv` was used as the validation artifact for the Step 4 batch skeleton. |
-| B | Corpus and taxonomy work | IN_PROGRESS | `code/taxonomy.py` now builds a 140-label allowed vocabulary from the sample CSV plus corpus folders and index breadcrumbs; validation accepts the six sample labels, rejects unknown labels, and maps example evidence paths to `conversation_management`, `travel_support`, and `community`. | Corpus parsing, chunking, and retrieval provenance are still pending, so the milestone is not yet complete. |
+| B | Corpus and taxonomy work | IN_PROGRESS | `code/taxonomy.py` builds a 140-label allowed vocabulary from the sample CSV plus corpus folders and index breadcrumbs; `code/corpus.py` now discovers 773 markdown files, parses frontmatter-rich articles, and marks representative navigation and stub pages as non-answer-bearing. | Heading-aware chunking and retrieval provenance are still pending, so the milestone is not yet complete. |
 | C | Deterministic baseline works | NOT_STARTED | - | Agent can route, retrieve, escalate, and emit complete outputs without any LLM/provider dependency. |
 | D | Sample evaluation is informative | NOT_STARTED | - | `evaluate_sample.py` reports categorical mismatches clearly. |
 | E | Optional LLM layer is additive | NOT_STARTED | - | Provider-backed synthesis improves safe replies without weakening categorical consistency or safety. |
@@ -165,7 +165,7 @@ Can be marked `VERIFIED` only when:
 | 3 | Inspect sample header and implement CSV writer | VERIFIED | `implementation-status.md`, `code/main.py` | `get_errors` reported no issues in `code/main.py`; a Python snippet loaded the real sample header, wrote a temporary CSV, and confirmed the first line matched `Issue,Subject,Company,Response,Product Area,Status,Request Type`; `main()` returned `0` and printed that same header. | Start Step 4: build the CLI skeleton and placeholder agent flow. |
 | 4 | Build CLI skeleton and placeholder agent flow | VERIFIED | `implementation-status.md`, `code/main.py`, `code/agent.py`, `support_tickets/output.step4.csv` | `get_errors` reported no issues in `code/main.py` and `code/agent.py`; `python main.py --output ../support_tickets/output.step4.csv` resolved `support_tickets/`, loaded 29 tickets, and wrote 29 rows; a follow-up CSV check confirmed `support_tickets/output.step4.csv` had 29 rows and the exact sample header. | Start Step 5: build the taxonomy module. |
 | 5 | Build taxonomy module | VERIFIED | `implementation-status.md`, `code/taxonomy.py` | `get_errors` reported no issues in `code/taxonomy.py`; a Python validation snippet confirmed the six sample labels were present, `validate_product_area("screen")` succeeded, `validate_product_area("totally_unknown_label")` raised a `ValueError`, and evidence mapping resolved example paths to `conversation_management`, `travel_support`, and `community`. | Start Step 6: build the corpus parser. |
-| 6 | Build corpus parser | NOT_STARTED | - | - | Scan markdown, parse metadata, normalize text, and detect stubs. |
+| 6 | Build corpus parser | VERIFIED | `implementation-status.md`, `code/corpus.py` | `get_errors` initially showed no editor issues, then a Python validation snippet caught and helped confirm a regex syntax fix; the rerun discovered 773 markdown files, parsed `data/claude/claude/features-and-capabilities/14465370-use-claude-for-word.md` with title `Use Claude for Word` and breadcrumbs `('Claude', 'Features and capabilities')`, flagged `data/claude/index.md` as `navigation_index`, and flagged `data/visa/support/consumer/checkout-fees-contact-form.md` as `short_stub`. | Start Step 7: add heading-aware chunking. |
 | 7 | Add heading-aware chunking | NOT_STARTED | - | - | Split only long files by headings; keep short FAQ docs whole. |
 | 8 | Implement lexical retrieval | NOT_STARTED | - | - | Add TF-IDF or BM25 retrieval with domain filtering and provenance. |
 | 9 | Implement domain detection | NOT_STARTED | - | - | Trust `company` when plausible; infer cautiously when missing. |
@@ -442,3 +442,10 @@ Append short project-state updates here when useful. Do not use this as a replac
 - Agent: `GitHub Copilot`
 - Summary: `Step 5 added code/taxonomy.py to seed allowed product-area labels from the sample CSV and extend them with corpus-derived labels and aliases from the data indexes and folder structure.`
 - Evidence: `get_errors reported no issues in code/taxonomy.py, and a Python validation snippet confirmed the sample labels were included, unknown labels were rejected, and representative evidence paths mapped to canonical labels.`
+
+### Update 7
+
+- Timestamp: `2026-05-01T13:36:08.5941108+02:00`
+- Agent: `GitHub Copilot`
+- Summary: `Step 6 replaced the corpus stub with file-level markdown discovery and parsing, including frontmatter extraction, title and breadcrumb derivation, text normalization, and non-answer-bearing page detection.`
+- Evidence: `A Python validation snippet discovered 773 markdown files, parsed a representative Claude article correctly, and marked a corpus index page and a short Visa contact page as non-answer-bearing.`
