@@ -45,7 +45,7 @@ MANUAL_REGRESSION_CASES: Final[tuple[ManualRegressionCase, ...]] = (
 		expected_status="escalated",
 		expected_request_type="bug",
 		expected_product_area="general_support",
-		justification_contains=("outage_or_incident", "service_outage"),
+		justification_contains=("platform-wide outage or service incident",),
 		response_contains=("wider service incident",),
 	),
 	ManualRegressionCase(
@@ -59,7 +59,7 @@ MANUAL_REGRESSION_CASES: Final[tuple[ManualRegressionCase, ...]] = (
 		expected_status="escalated",
 		expected_request_type="product_issue",
 		expected_product_area="general_support",
-		justification_contains=("assessment_score_or_integrity", "score_or_integrity_dispute"),
+		justification_contains=("assessment result", "integrity decision"),
 		response_contains=("assessment or integrity-related issue",),
 	),
 	ManualRegressionCase(
@@ -73,7 +73,7 @@ MANUAL_REGRESSION_CASES: Final[tuple[ManualRegressionCase, ...]] = (
 		expected_status="escalated",
 		expected_request_type="product_issue",
 		expected_product_area="general_support",
-		justification_contains=("account_access_restoration", "restore_or_reverse_access"),
+		justification_contains=("account restoration", "human verification"),
 		response_contains=("restoring access",),
 	),
 	ManualRegressionCase(
@@ -87,8 +87,8 @@ MANUAL_REGRESSION_CASES: Final[tuple[ManualRegressionCase, ...]] = (
 		expected_status="replied",
 		expected_request_type="product_issue",
 		expected_product_area="conversation_management",
-		justification_contains=("8230524-how-can-i-delete-or-rename-a-conversation.md",),
-		response_contains=("delete or rename an individual conversation",),
+		justification_contains=("conversation-management guidance",),
+		response_contains=("delete or rename an individual conversation", "Delete Selected"),
 	),
 	ManualRegressionCase(
 		case_id="claude_account_deletion",
@@ -101,8 +101,8 @@ MANUAL_REGRESSION_CASES: Final[tuple[ManualRegressionCase, ...]] = (
 		expected_status="replied",
 		expected_request_type="product_issue",
 		expected_product_area="claude_api_and_console",
-		justification_contains=("10366376-how-can-i-delete-my-claude-console-account.md",),
-		response_contains=("outstanding balance",),
+		justification_contains=("Console account-deletion guidance",),
+		response_contains=("outstanding balance", "Settings > Billing"),
 	),
 	ManualRegressionCase(
 		case_id="visa_stolen_traveller_cheques",
@@ -115,7 +115,7 @@ MANUAL_REGRESSION_CASES: Final[tuple[ManualRegressionCase, ...]] = (
 		expected_status="escalated",
 		expected_request_type="product_issue",
 		expected_product_area="general_support",
-		justification_contains=("fraud_or_unauthorized", "fraud_or_unauthorized_activity"),
+		justification_contains=("fraud, loss, theft, or unauthorized activity",),
 		response_contains=("possible fraud, loss, theft, or unauthorized activity",),
 	),
 	ManualRegressionCase(
@@ -129,7 +129,7 @@ MANUAL_REGRESSION_CASES: Final[tuple[ManualRegressionCase, ...]] = (
 		expected_status="escalated",
 		expected_request_type="product_issue",
 		expected_product_area="general_support",
-		justification_contains=("fraud_or_unauthorized", "fraud_or_unauthorized_activity"),
+		justification_contains=("fraud, loss, theft, or unauthorized activity",),
 		response_contains=("possible fraud, loss, theft, or unauthorized activity",),
 	),
 	ManualRegressionCase(
@@ -143,7 +143,7 @@ MANUAL_REGRESSION_CASES: Final[tuple[ManualRegressionCase, ...]] = (
 		expected_status="escalated",
 		expected_request_type="product_issue",
 		expected_product_area="general_support",
-		justification_contains=("billing_dispute", "charge_or_refund_dispute"),
+		justification_contains=("billing investigation", "refund decision"),
 		response_contains=("billing or refund issue",),
 	),
 	ManualRegressionCase(
@@ -155,7 +155,7 @@ MANUAL_REGRESSION_CASES: Final[tuple[ManualRegressionCase, ...]] = (
 		),
 		expected_status="replied",
 		expected_request_type="invalid",
-		justification_contains=("invalid-request template",),
+			justification_contains=("out-of-scope template",),
 		response_contains=("out of scope from my capabilities",),
 	),
 )

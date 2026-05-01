@@ -31,6 +31,8 @@ SEMANTIC_CONCEPT_SYNONYMS: Final[dict[str, frozenset[str]]] = {
 	"conversation": frozenset({"chat", "chats", "conversation", "conversations", "thread", "threads"}),
 	"delete": frozenset({"clear", "close", "delete", "erase", "remove", "wipe"}),
 	"privacy": frozenset({"confidential", "private", "privacy", "sensitive"}),
+	"retention": frozenset({"retain", "retained", "retention", "store", "stored", "storage", "years"}),
+	"schedule": frozenset({"date", "hiring", "recruiter", "reschedule", "rescheduled", "rescheduling", "schedule", "scheduled", "time"}),
 	"security_report": frozenset(
 		{"bounty", "disclosure", "jailbreak", "report", "reporting", "security", "vulnerability", "vulnerabilities"}
 	),
@@ -55,6 +57,13 @@ QUERY_EXPANSION_RULES: Final[tuple[tuple[frozenset[str], tuple[str, ...]], ...]]
 	(frozenset({"cheques"}), ("cheque", "travellers", "travelers")),
 	(frozenset({"compatible", "zoom"}), ("compatibility", "system", "browser", "network", "interview")),
 	(frozenset({"compatible", "connectivity"}), ("compatibility", "system", "browser", "network")),
+	(frozenset({"reschedule"}), ("candidate", "hiring", "recruiter", "workflow")),
+	(frozenset({"rescheduling"}), ("candidate", "hiring", "recruiter", "workflow", "reschedule")),
+	(frozenset({"assessment", "reschedule"}), ("candidate", "hiring", "recruiter", "workflow")),
+	(frozenset({"assessment", "rescheduling"}), ("candidate", "hiring", "recruiter", "workflow", "reschedule")),
+	(frozenset({"test", "reschedule"}), ("candidate", "hiring", "recruiter", "workflow")),
+	(frozenset({"data", "improve", "models"}), ("retention", "store", "stored", "training", "years")),
+	(frozenset({"how", "long", "data"}), ("retention", "store", "stored")),
 	(frozenset({"remove", "user"}), ("users", "team", "teams", "admin")),
 	(frozenset({"employee", "left"}), ("remove", "user", "users", "team", "teams", "admin")),
 	(frozenset({"bedrock"}), ("amazon", "aws", "support")),
@@ -123,9 +132,13 @@ def _semantic_concept_score(
 		score += 5.0
 	if {"team", "delete"} <= shared_concepts:
 		score += 4.0
+	if {"schedule"} <= shared_concepts:
+		score += 3.0
 	if {"bedrock"} <= shared_concepts:
 		score += 3.0
 	if {"compatibility"} <= shared_concepts:
+		score += 3.0
+	if {"retention"} <= shared_concepts:
 		score += 3.0
 	if {"security_report"} <= shared_concepts:
 		score += 3.0
@@ -181,12 +194,37 @@ def _chunk_preference_score(chunk: RetrievedChunk, query_tokens: frozenset[str])
 			score += 3.5
 		if "/settings/teams-management/" in path_text:
 			score += 6.0
+		if "manage-team-members" in path_text:
+			score += 10.0
+		if "locking-user-access" in path_text:
+			score += 7.0
+		if "grant-team-admin-access" in path_text:
+			score -= 5.0
 		if "/integrations/" in path_text:
 			score -= 2.5
+	if (
+		("assessment" in query_tokens or "test" in query_tokens)
+		and ({"reschedule", "rescheduling"} & query_tokens)
+	):
+		if "ensuring-a-great-candidate-experience" in path_text:
+			score += 14.0
+		if "/interviews/manage-interviews/" in path_text:
+			score += 5.0
+		if "onboarding-candidates" in path_text or "email-template" in path_text:
+			score -= 8.0
 	if "bedrock" in query_tokens:
 		if "amazon-bedrock" in path_text or "amazon_bedrock" in path_text:
 			score += 4.0
 		if "team-and-enterprise-plans" in path_text:
+			score -= 1.5
+	if ({"improve", "models"} <= query_tokens or "retention" in query_tokens) and "data" in query_tokens:
+		if "development-partner-program" in path_text:
+			score += 8.0
+		if "custom-data-retention-controls" in path_text:
+			score += 8.0
+		if "security-and-compliance" in path_text and {"retention", "store", "stored", "years"} & metadata_tokens:
+			score += 6.0
+		if "input-sensitive-data" in path_text and {"how", "long"} <= query_tokens:
 			score -= 1.5
 	if "lti" in query_tokens and {"lti", "education", "canvas", "developer", "key"} & metadata_tokens:
 		score += 4.0

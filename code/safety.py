@@ -130,12 +130,19 @@ ACCOUNT_ACCESS_RULES: Final[tuple[tuple[str, tuple[str, ...]], ...]] = (
 	(
 		"restore_or_reverse_access",
 		(
+			"access lost",
+			"lost access",
+			"lost admin access",
+			"lost owner access",
 			"restore access",
+			"restore my access",
 			"regain access",
 			"recover access",
 			"unlock my account",
 			"unlock account",
 			"locked out",
+			"removed my seat",
+			"removed my access",
 			"reverse admin removal",
 			"removed from the workspace",
 			"removed me from the workspace",
@@ -268,11 +275,9 @@ FEATURE_REQUEST_PHRASES: Final[tuple[str, ...]] = (
 	"please add",
 	"can you add",
 	"would like to see",
-	"i would like",
 	"enhancement",
 	"add support for",
 	"allow users to",
-	"it would be helpful",
 	"could you support",
 )
 BUG_PHRASES: Final[tuple[str, ...]] = (
