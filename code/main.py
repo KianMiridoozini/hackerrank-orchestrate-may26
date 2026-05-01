@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import argparse
 import csv
 from functools import lru_cache
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
-from config import DEFAULT_ENCODING, OUTPUT_TICKETS_PATH, SAMPLE_TICKETS_PATH
+from agent import process_ticket
+from config import DEFAULT_ENCODING, INPUT_TICKETS_PATH, OUTPUT_TICKETS_PATH, SAMPLE_TICKETS_PATH
+from schemas import InputTicket
 
 
 REQUIRED_SAMPLE_COLUMNS: tuple[str, ...] = (
@@ -18,6 +21,12 @@ REQUIRED_SAMPLE_COLUMNS: tuple[str, ...] = (
 	"Product Area",
 	"Status",
 	"Request Type",
+)
+
+REQUIRED_INPUT_COLUMNS: tuple[str, ...] = (
+	"Issue",
+	"Subject",
+	"Company",
 )
 
 
@@ -111,11 +120,77 @@ def write_output_csv(
 	return output_path
 
 
-def main() -> int:
-	"""Validate the CSV contract at startup and surface the active header."""
+def load_input_tickets(input_path: Path = INPUT_TICKETS_PATH) -> list[InputTicket]:
+	"""Read the input CSV into shared ticket models."""
 
-	output_header = load_output_header()
-	print(",".join(output_header))
+	try:
+		with input_path.open("r", encoding=DEFAULT_ENCODING, newline="") as handle:
+			reader = csv.DictReader(handle)
+			fieldnames = tuple(reader.fieldnames or ())
+			missing_columns = tuple(
+				column_name for column_name in REQUIRED_INPUT_COLUMNS if column_name not in fieldnames
+			)
+			if missing_columns:
+				missing_text = ", ".join(missing_columns)
+				raise RuntimeError(
+					"Unable to load the input CSV because the header is missing required "
+					f"columns: {missing_text}"
+				)
+
+			tickets: list[InputTicket] = []
+			for raw_row in reader:
+				ticket = InputTicket(
+					issue=raw_row.get("Issue", ""),
+					subject=raw_row.get("Subject"),
+					company=raw_row.get("Company"),
+					raw_row=dict(raw_row),
+				)
+				tickets.append(ticket)
+			return tickets
+	except FileNotFoundError as exc:
+		raise RuntimeError(
+			f"Unable to load the input CSV because the file is missing: {input_path}"
+		) from exc
+	except OSError as exc:
+		raise RuntimeError(
+			f"Unable to load the input CSV because the file is unreadable: {input_path}"
+		) from exc
+
+
+def build_output_rows(tickets: Sequence[InputTicket]) -> list[dict[str, object]]:
+	"""Run the placeholder agent flow for each ticket and preserve input columns."""
+
+	rows: list[dict[str, object]] = []
+	for ticket in tickets:
+		output_row = dict(ticket.raw_row)
+		output_row.update(process_ticket(ticket))
+		rows.append(output_row)
+	return rows
+
+
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+	"""Parse CLI arguments for the batch run."""
+
+	parser = argparse.ArgumentParser(description=__doc__)
+	parser.add_argument("--input", type=Path, default=INPUT_TICKETS_PATH)
+	parser.add_argument("--output", type=Path, default=OUTPUT_TICKETS_PATH)
+	parser.add_argument("--sample", type=Path, default=SAMPLE_TICKETS_PATH)
+	return parser.parse_args(argv)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+	"""Run the minimal batch pipeline over the input CSV."""
+
+	args = parse_args(argv)
+	output_header = load_output_header(args.sample)
+	tickets = load_input_tickets(args.input)
+	rows = build_output_rows(tickets)
+	write_output_csv(rows, output_path=args.output, sample_path=args.sample)
+
+	print(f"Resolved support directory: {args.input.parent}")
+	print(f"Loaded {len(tickets)} tickets from {args.input}")
+	print(f"Wrote {len(rows)} rows to {args.output}")
+	print(f"Output header: {','.join(output_header)}")
 	return 0
 
 

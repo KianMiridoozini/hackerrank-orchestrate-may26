@@ -49,9 +49,9 @@ Last updated: `VERIFIED`
 
 Updated by: `GitHub Copilot`
 
-Current focus: `Step 3 is verified: main.py now reads the sample header as the CSV contract and writes rows in that exact order.`
+Current focus: `Step 4 is verified: the CLI now reads the input CSV, runs a placeholder agent flow for each row, and writes a structurally valid output CSV.`
 
-Current recommended next action: `Start Step 4: build the simplest CLI skeleton in main.py and a placeholder agent flow in agent.py.`
+Current recommended next action: `Start Step 5: build the taxonomy module from sample labels and corpus structure.`
 
 ---
 
@@ -59,7 +59,7 @@ Current recommended next action: `Start Step 4: build the simplest CLI skeleton 
 
 | ID | Milestone | Status | Evidence | Notes |
 |---|---|---|---|---|
-| A | Batch skeleton works | NOT_STARTED | - | `code/main.py` can read input rows and write a correctly structured output CSV. |
+| A | Batch skeleton works | VERIFIED | `python code/main.py --output ../support_tickets/output.step4.csv` ran without crashing after `pydantic` was installed in the workspace venv; the command resolved `support_tickets/`, loaded 29 tickets, and wrote 29 rows. A follow-up CSV check confirmed the output header matched the sample header exactly. | `support_tickets/output.step4.csv` was used as the validation artifact for the Step 4 batch skeleton. |
 | B | Corpus and taxonomy work | NOT_STARTED | - | Corpus records/chunks build successfully and `product_area` values can be validated. |
 | C | Deterministic baseline works | NOT_STARTED | - | Agent can route, retrieve, escalate, and emit complete outputs without any LLM/provider dependency. |
 | D | Sample evaluation is informative | NOT_STARTED | - | `evaluate_sample.py` reports categorical mismatches clearly. |
@@ -163,7 +163,7 @@ Can be marked `VERIFIED` only when:
 | 1 | Create module layout under `code/` | VERIFIED | `implementation-status.md`, `code/main.py`, `code/config.py`, `code/schemas.py`, `code/corpus.py`, `code/retriever.py`, `code/safety.py`, `code/taxonomy.py`, `code/llm.py`, `code/agent.py`, `code/evaluate_sample.py`, `code/README.md` | `list_dir code/` showed the planned file set and `get_errors` reported no errors for the touched Python stubs. | Start Step 2: define config and schema boundaries. |
 | 2 | Define config and schema boundaries | VERIFIED | `implementation-status.md`, `code/config.py`, `code/schemas.py` | `get_errors` reported no issues in `code/config.py` and `code/schemas.py`, and `python -c "import config, schemas; print('ok')"` returned `ok` from `code/` using the configured interpreter. | Start Step 3: inspect the sample header and implement the CSV writer contract. |
 | 3 | Inspect sample header and implement CSV writer | VERIFIED | `implementation-status.md`, `code/main.py` | `get_errors` reported no issues in `code/main.py`; a Python snippet loaded the real sample header, wrote a temporary CSV, and confirmed the first line matched `Issue,Subject,Company,Response,Product Area,Status,Request Type`; `main()` returned `0` and printed that same header. | Start Step 4: build the CLI skeleton and placeholder agent flow. |
-| 4 | Build CLI skeleton and placeholder agent flow | NOT_STARTED | - | - | Make `main.py` read rows, call placeholder agent, and write valid rows. |
+| 4 | Build CLI skeleton and placeholder agent flow | VERIFIED | `implementation-status.md`, `code/main.py`, `code/agent.py`, `support_tickets/output.step4.csv` | `get_errors` reported no issues in `code/main.py` and `code/agent.py`; `python main.py --output ../support_tickets/output.step4.csv` resolved `support_tickets/`, loaded 29 tickets, and wrote 29 rows; a follow-up CSV check confirmed `support_tickets/output.step4.csv` had 29 rows and the exact sample header. | Start Step 5: build the taxonomy module. |
 | 5 | Build taxonomy module | NOT_STARTED | - | - | Seed product areas from sample labels and corpus taxonomy. |
 | 6 | Build corpus parser | NOT_STARTED | - | - | Scan markdown, parse metadata, normalize text, and detect stubs. |
 | 7 | Add heading-aware chunking | NOT_STARTED | - | - | Split only long files by headings; keep short FAQ docs whole. |
@@ -428,3 +428,10 @@ Append short project-state updates here when useful. Do not use this as a replac
 - Agent: `GitHub Copilot`
 - Summary: `Step 3 updated code/main.py to read the sample CSV header as the output contract and to write rows using that exact column order.`
 - Evidence: `get_errors reported no issues in code/main.py, a Python validation snippet confirmed a temporary output CSV used the same header as the sample, and main() returned 0 while printing that header.`
+
+### Update 5
+
+- Timestamp: `2026-05-01T12:37:37.3043239+02:00`
+- Agent: `GitHub Copilot`
+- Summary: `Step 4 added a minimal batch CLI in code/main.py and a placeholder per-ticket flow in code/agent.py so the pipeline can read the input CSV and write structurally valid output rows.`
+- Evidence: `The CLI command loaded 29 tickets from support_tickets/support_tickets.csv and wrote 29 rows to support_tickets/output.step4.csv, then a follow-up CSV check confirmed the output header matched the sample header exactly.`
