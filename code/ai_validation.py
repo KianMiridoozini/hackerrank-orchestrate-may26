@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import Final
 
-from schemas import Company, OutputRow, RequestType, RetrievedChunk, TicketStatus
+from schemas import Company, EscalationCategory, OutputRow, RequestType, RetrievedChunk, TicketStatus
 from taxonomy import map_retrieved_chunk_to_product_area
 
 
@@ -24,12 +24,27 @@ FORBIDDEN_OUTPUT_MARKERS: Final[tuple[str, ...]] = (
 	"topic:",
 	"content:",
 )
+HARD_SAFETY_VETO_CATEGORIES: Final[frozenset[EscalationCategory]] = frozenset(
+	{
+		EscalationCategory.FRAUD_OR_UNAUTHORIZED,
+		EscalationCategory.ACCOUNT_ACCESS,
+		EscalationCategory.BILLING_DISPUTE,
+		EscalationCategory.ASSESSMENT_INTEGRITY,
+		EscalationCategory.OUTAGE,
+		EscalationCategory.LEGAL_OR_PRIVACY,
+		EscalationCategory.MALICIOUS_OR_OUT_OF_SCOPE,
+	}
+)
 
 
 def _normalize_text(value: str | None) -> str:
 	if value is None:
 		return ""
 	return WHITESPACE_PATTERN.sub(" ", value.strip())
+
+
+def has_hard_safety_veto(category: EscalationCategory | None) -> bool:
+	return category in HARD_SAFETY_VETO_CATEGORIES
 
 
 def _specific_alternative_candidate_product_areas(

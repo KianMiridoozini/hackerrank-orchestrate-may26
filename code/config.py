@@ -103,6 +103,7 @@ AI_TRACE_PATH: Final[Path] = CACHE_ROOT / "ai_trace.jsonl"
 
 DEFAULT_ENCODING: Final[str] = "utf-8"
 AI_MODE_ENV: Final[str] = "AI_MODE"
+AI_TRIAGE_AGGRESSIVE_ENV: Final[str] = "AI_TRIAGE_AGGRESSIVE"
 DEFAULT_AI_MODE: Final[str] = "off"
 DEFAULT_PROVIDER_NAME: Final[str] = "gemini"
 DEFAULT_MODEL_TEMPERATURE: Final[float] = 0.0

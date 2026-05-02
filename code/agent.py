@@ -10,8 +10,8 @@ from collections import Counter
 from datetime import datetime, timezone
 from typing import Any, Final, Mapping
 
-from ai_validation import resolve_should_escalate_reason, triage_budget_reasons, validate_customer_text
-from config import AI_MODE_ENV, AI_TRACE_PATH, DEFAULT_AI_MODE
+from ai_validation import has_hard_safety_veto, resolve_should_escalate_reason, triage_budget_reasons, validate_customer_text
+from config import AI_MODE_ENV, AI_TRACE_PATH, AI_TRIAGE_AGGRESSIVE_ENV, DEFAULT_AI_MODE
 from llm import Transport, call_structured_llm
 from response_builder import build_escalation_result, build_invalid_result, build_replied_justification, build_reply_result
 from retrieval_policy import expand_query_text, rerank_retrieved_chunks
@@ -157,6 +157,12 @@ def _resolve_ai_mode(environ: Mapping[str, str] | None = None) -> AIMode:
 		return AIMode(configured_value)
 	except ValueError:
 		return AIMode.OFF
+
+
+def _triage_aggressive_enabled(environ: Mapping[str, str] | None = None) -> bool:
+	resolved_environ = os.environ if environ is None else environ
+	configured_value = (resolved_environ.get(AI_TRIAGE_AGGRESSIVE_ENV) or "").strip().lower()
+	return configured_value in {"1", "true", "yes", "on"}
 
 
 def _has_specific_query_terms(query_text: str) -> bool:
@@ -414,6 +420,7 @@ def _build_triage_prompt(
 	resolved_company: Company | None,
 	candidate_product_areas: tuple[str, ...],
 	deterministic_result: OutputRow,
+	hard_safety_veto: bool,
 	retrieved_chunks: tuple[RetrievedChunk, ...],
 ) -> str:
 	company_text = resolved_company.value if resolved_company is not None else "unresolved"
@@ -434,6 +441,7 @@ def _build_triage_prompt(
 		f"allowed_status_values: {status_values}\n"
 		f"allowed_request_type_values: {request_type_values}\n"
 		f"candidate_product_areas: {product_area_values}\n"
+		f"hard_safety_veto: {'true' if hard_safety_veto else 'false'}\n"
 		f"fallback_status: {deterministic_result.status.value}\n"
 		f"fallback_request_type: {deterministic_result.request_type.value}\n"
 		f"fallback_product_area: {deterministic_result.product_area}\n"
@@ -441,6 +449,8 @@ def _build_triage_prompt(
 		f"fallback_justification: {deterministic_result.justification}\n"
 		f"fallback_should_escalate_reason: {fallback_should_escalate_reason}\n\n"
 		"Use only the local evidence below. If support is weak or conflicting, either escalate with a concise should_escalate_reason or return the fallback. "
+		"Do not use outside knowledge. Do not mention source paths, scores, evidence labels, or internal reasoning. "
+		"If hard_safety_veto=true, do not change escalated to replied. "
 		"If you choose status=escalated, you must provide should_escalate_reason. If the fallback is already escalated and you agree with it, reuse or rewrite fallback_should_escalate_reason concisely. "
 		"If you reuse fallback wording, rewrite any internal support-note phrasing into plain customer-facing language.\n\n"
 		f"{evidence_text}"
@@ -630,10 +640,14 @@ def _apply_triage_mode(
 	normalized_ticket: NormalizedTicket,
 	resolved_company: Company | None,
 	deterministic_result: OutputRow,
+	hard_safety_veto: bool,
+	aggressive_mode: bool,
 	retrieved_chunks: tuple[RetrievedChunk, ...],
 	environ: Mapping[str, str] | None,
 	transport: Transport | None,
 ) -> tuple[OutputRow, dict[str, Any]]:
+	if deterministic_result.request_type is RequestType.INVALID:
+		return deterministic_result, {"outcome": "triage_skipped_invalid", "llm_called": False}
 	if not retrieved_chunks:
 		return deterministic_result, {"outcome": "triage_skipped_no_evidence", "llm_called": False}
 
@@ -648,7 +662,9 @@ def _apply_triage_mode(
 		retrieved_chunks=retrieved_chunks,
 		candidate_product_areas=candidate_product_areas,
 	)
-	if not budget_reasons:
+	if aggressive_mode:
+		budget_reasons = ("aggressive_mode",)
+	elif not budget_reasons:
 		return (
 			deterministic_result,
 			{
@@ -665,6 +681,7 @@ def _apply_triage_mode(
 			resolved_company=resolved_company,
 			candidate_product_areas=candidate_product_areas,
 			deterministic_result=deterministic_result,
+			hard_safety_veto=hard_safety_veto,
 			retrieved_chunks=retrieved_chunks,
 		),
 		max_output_tokens=AI_TRIAGE_MAX_OUTPUT_TOKENS,
@@ -677,16 +694,30 @@ def _apply_triage_mode(
 		"model": llm_result.model,
 		"failure_reason": llm_result.failure_reason,
 		"candidate_product_areas": list(candidate_product_areas),
-		"details": {"budget_reasons": list(budget_reasons)},
+		"details": {
+			"budget_reasons": list(budget_reasons),
+			"hard_safety_veto": hard_safety_veto,
+			"aggressive_mode": aggressive_mode,
+		},
 	}
 	if not llm_result.succeeded or llm_result.value is None:
 		trace["outcome"] = f"triage_rejected_{llm_result.failure_reason or 'llm_unavailable'}"
+		return deterministic_result, trace
+
+	if hard_safety_veto and llm_result.value.status is not TicketStatus.ESCALATED:
+		trace["outcome"] = "triage_rejected_hard_safety_veto_status_change"
 		return deterministic_result, trace
 
 	try:
 		canonical_product_area = validate_product_area(llm_result.value.product_area)
 	except ValueError:
 		trace["outcome"] = "triage_rejected_invalid_product_area"
+		return deterministic_result, trace
+	if hard_safety_veto and llm_result.value.request_type is not deterministic_result.request_type:
+		trace["outcome"] = "triage_rejected_hard_safety_veto_request_type_change"
+		return deterministic_result, trace
+	if hard_safety_veto and canonical_product_area != deterministic_result.product_area:
+		trace["outcome"] = "triage_rejected_hard_safety_veto_product_area_change"
 		return deterministic_result, trace
 	if canonical_product_area not in candidate_product_areas:
 		trace["outcome"] = "triage_rejected_product_area_outside_candidates"
@@ -744,11 +775,11 @@ def _apply_triage_mode(
 	trace["outcome"] = "triage_accepted"
 	return (
 		OutputRow(
-			status=llm_result.value.status,
-			product_area=canonical_product_area,
+			status=deterministic_result.status if hard_safety_veto else llm_result.value.status,
+			product_area=deterministic_result.product_area if hard_safety_veto else canonical_product_area,
 			response=_normalize_output_text(llm_result.value.response),
 			justification=accepted_justification,
-			request_type=llm_result.value.request_type,
+			request_type=deterministic_result.request_type if hard_safety_veto else llm_result.value.request_type,
 		),
 		trace,
 	)
@@ -857,40 +888,11 @@ def process_ticket(
 	"""Run the deterministic baseline with optional bounded AI overlays."""
 
 	ai_mode = _resolve_ai_mode(llm_environ)
+	aggressive_mode = _triage_aggressive_enabled(llm_environ)
 	normalized_ticket = normalize_ticket(ticket)
 	resolved_company = normalized_ticket.detected_company or _trusted_company(normalized_ticket.company)
 	safety_decision = assess_ticket_safety(normalized_ticket)
-	if safety_decision.should_escalate:
-		deterministic_result = build_escalation_result(safety_decision, resolved_company=resolved_company)
-		trace: dict[str, Any] = {
-			"outcome": "vetoed_high_risk_safety",
-			"llm_called": False,
-			"details": {
-				"category": safety_decision.category.value if safety_decision.category is not None else "none",
-			}
-		}
-		if ai_mode is AIMode.REVIEW:
-			trace = _run_review_mode(
-				normalized_ticket=normalized_ticket,
-				resolved_company=resolved_company,
-				deterministic_result=deterministic_result,
-				retrieved_chunks=(),
-				environ=llm_environ,
-				transport=llm_transport,
-			)
-			trace["details"] = {
-				"category": safety_decision.category.value if safety_decision.category is not None else "none",
-				"safety_veto": True,
-			}
-		_append_ai_trace(
-			ai_mode=ai_mode,
-			normalized_ticket=normalized_ticket,
-			resolved_company=resolved_company,
-			deterministic_result=deterministic_result,
-			final_result=deterministic_result,
-			trace=trace,
-		)
-		return _serialize_result(deterministic_result)
+	hard_safety_veto = has_hard_safety_veto(safety_decision.category)
 
 	retrieved_chunks: tuple[RetrievedChunk, ...] = ()
 	if resolved_company is not None or ai_mode is AIMode.TRIAGE:
@@ -907,13 +909,62 @@ def process_ticket(
 			)
 		)
 
-	deterministic_result, _ = _build_deterministic_result(
-		normalized_ticket=normalized_ticket,
-		resolved_company=resolved_company,
-		safety_decision=safety_decision,
-		retrieved_chunks=retrieved_chunks,
-	)
+	if safety_decision.should_escalate:
+		deterministic_result = build_escalation_result(safety_decision, resolved_company=resolved_company)
+	else:
+		deterministic_result, _ = _build_deterministic_result(
+			normalized_ticket=normalized_ticket,
+			resolved_company=resolved_company,
+			safety_decision=safety_decision,
+			retrieved_chunks=retrieved_chunks,
+		)
 	final_result = deterministic_result
+
+	if safety_decision.should_escalate and hard_safety_veto:
+		if ai_mode is AIMode.TRIAGE:
+			final_result, trace = _apply_triage_mode(
+				normalized_ticket=normalized_ticket,
+				resolved_company=resolved_company,
+				deterministic_result=deterministic_result,
+				hard_safety_veto=True,
+				aggressive_mode=aggressive_mode,
+				retrieved_chunks=retrieved_chunks,
+				environ=llm_environ,
+				transport=llm_transport,
+			)
+		elif ai_mode is AIMode.REVIEW:
+			trace = _run_review_mode(
+				normalized_ticket=normalized_ticket,
+				resolved_company=resolved_company,
+				deterministic_result=deterministic_result,
+				retrieved_chunks=retrieved_chunks,
+				environ=llm_environ,
+				transport=llm_transport,
+			)
+		else:
+			trace = {
+				"outcome": "vetoed_high_risk_safety",
+				"llm_called": False,
+				"details": {
+					"category": safety_decision.category.value if safety_decision.category is not None else "none",
+					"hard_safety_veto": True,
+				},
+			}
+		if "details" not in trace:
+			trace["details"] = {}
+		trace["details"]["category"] = (
+			safety_decision.category.value if safety_decision.category is not None else "none"
+		)
+		trace["details"]["hard_safety_veto"] = True
+		_append_ai_trace(
+			ai_mode=ai_mode,
+			normalized_ticket=normalized_ticket,
+			resolved_company=resolved_company,
+			deterministic_result=deterministic_result,
+			final_result=final_result,
+			trace=trace,
+		)
+		return _serialize_result(final_result)
 
 	if ai_mode is AIMode.OFF:
 		trace = {"outcome": "skipped_off", "llm_called": False}
@@ -931,6 +982,8 @@ def process_ticket(
 			normalized_ticket=normalized_ticket,
 			resolved_company=resolved_company,
 			deterministic_result=deterministic_result,
+			hard_safety_veto=False,
+			aggressive_mode=aggressive_mode,
 			retrieved_chunks=retrieved_chunks,
 			environ=llm_environ,
 			transport=llm_transport,
