@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 import re
 from typing import Final
 
@@ -11,14 +12,26 @@ from taxonomy import map_retrieved_chunk_to_product_area
 
 WHITESPACE_PATTERN: Final[re.Pattern[str]] = re.compile(r"\s+")
 TRIAGE_NEAR_TIE_SCORE_RATIO: Final[float] = 0.92
+PRODUCT_AREA_SUPPORT_LIMIT: Final[int] = 5
 FORBIDDEN_OUTPUT_MARKERS: Final[tuple[str, ...]] = (
 	"source_path",
 	"rank=",
 	"score=",
 	"resolved_company",
 	"retrieved evidence",
+	"evidence snippet",
 	"fallback_response",
 	"fallback_justification",
+	"fallback_status",
+	"fallback_request_type",
+	"fallback_product_area",
+	"fallback_should_escalate_reason",
+	"candidate_product_area",
+	"candidate_product_areas",
+	"allowed_status_values",
+	"allowed_request_type_values",
+	"company_or_domain",
+	"deterministic_escalation_kind",
 	"title:",
 	"heading:",
 	"topic:",
@@ -122,6 +135,43 @@ def triage_budget_reasons(
 	):
 		reasons.append("near_tie_retrieval")
 	return tuple(reasons)
+
+
+def _product_area_support_counts(
+	*,
+	retrieved_chunks: tuple[RetrievedChunk, ...],
+	resolved_company: Company | None,
+) -> Counter[str]:
+	counts: Counter[str] = Counter()
+	for chunk in retrieved_chunks[:PRODUCT_AREA_SUPPORT_LIMIT]:
+		counts[map_retrieved_chunk_to_product_area(chunk, resolved_company)] += 1
+	return counts
+
+
+def supports_product_area_change(
+	*,
+	deterministic_product_area: str,
+	proposed_product_area: str,
+	retrieved_chunks: tuple[RetrievedChunk, ...],
+	resolved_company: Company | None,
+) -> bool:
+	if proposed_product_area == deterministic_product_area:
+		return True
+	support_counts = _product_area_support_counts(
+		retrieved_chunks=retrieved_chunks,
+		resolved_company=resolved_company,
+	)
+	proposed_count = support_counts.get(proposed_product_area, 0)
+	deterministic_count = support_counts.get(deterministic_product_area, 0)
+	if proposed_count <= deterministic_count:
+		return False
+	if proposed_count <= 0:
+		return False
+	max_support = max(support_counts.values(), default=0)
+	if proposed_count != max_support:
+		return False
+	best_supported_areas = [area for area, count in support_counts.items() if count == max_support]
+	return len(best_supported_areas) == 1 and best_supported_areas[0] == proposed_product_area
 
 
 def contains_forbidden_output_content(text: str, *, retrieved_chunks: tuple[RetrievedChunk, ...]) -> bool:

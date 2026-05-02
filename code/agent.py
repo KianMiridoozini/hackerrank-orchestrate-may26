@@ -10,7 +10,13 @@ from collections import Counter
 from datetime import datetime, timezone
 from typing import Any, Final, Mapping
 
-from ai_validation import has_hard_safety_veto, resolve_should_escalate_reason, triage_budget_reasons, validate_customer_text
+from ai_validation import (
+	has_hard_safety_veto,
+	resolve_should_escalate_reason,
+	supports_product_area_change,
+	triage_budget_reasons,
+	validate_customer_text,
+)
 from config import AI_MODE_ENV, AI_TRACE_PATH, AI_TRIAGE_AGGRESSIVE_ENV, DEFAULT_AI_MODE
 from llm import Transport, call_structured_llm
 from response_builder import build_escalation_result, build_invalid_result, build_replied_justification, build_reply_result
@@ -760,6 +766,14 @@ def _apply_triage_mode(
 		return deterministic_result, trace
 	if canonical_product_area not in candidate_product_areas:
 		trace["outcome"] = "triage_rejected_product_area_outside_candidates"
+		return deterministic_result, trace
+	if not supports_product_area_change(
+		deterministic_product_area=deterministic_result.product_area,
+		proposed_product_area=canonical_product_area,
+		retrieved_chunks=retrieved_chunks,
+		resolved_company=resolved_company,
+	):
+		trace["outcome"] = "triage_rejected_ambiguous_product_area_change"
 		return deterministic_result, trace
 
 	response_reason = validate_customer_text(
