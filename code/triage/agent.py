@@ -799,6 +799,47 @@ def _enum_value(value: Any) -> Any:
 	return value
 
 
+def _display_label(value: str) -> str:
+	return value.replace("_", " ")
+
+
+def _ticket_focus_text(normalized_ticket: NormalizedTicket) -> str:
+	focus = (normalized_ticket.subject or normalized_ticket.issue).strip()
+	collapsed = WHITESPACE_PATTERN.sub(" ", focus)
+	if len(collapsed) <= 96:
+		return collapsed
+	truncated = collapsed[:96].rsplit(" ", 1)[0].rstrip(" ,;:")
+	return f"{truncated}..." if truncated else f"{collapsed[:96]}..."
+
+
+def _enrich_justification(
+	result: OutputRow,
+	*,
+	normalized_ticket: NormalizedTicket,
+	top_chunk: RetrievedChunk | None,
+) -> OutputRow:
+	base = _normalize_output_text(result.justification)
+	route_summary = (
+		f"Final routing: {result.status.value} / {_display_label(result.request_type.value)} / "
+		f"{_display_label(result.product_area)}."
+	)
+	parts = [base, route_summary, f'Ticket focus: "{_ticket_focus_text(normalized_ticket)}".']
+	if (
+		top_chunk is not None
+		and result.status is TicketStatus.ESCALATED
+		and "closest match" not in base.lower()
+		and "closest support topic" not in base.lower()
+	):
+		parts.append(f"Closest support topic reviewed: {_evidence_label(top_chunk)}.")
+	return OutputRow(
+		status=result.status,
+		product_area=result.product_area,
+		response=result.response,
+		justification=" ".join(parts),
+		request_type=result.request_type,
+	)
+
+
 def _append_ai_trace(
 	*,
 	ai_mode: AIMode,
@@ -890,7 +931,13 @@ def process_ticket(
 			final_result=deterministic_result,
 			trace=trace,
 		)
-		return _serialize_result(deterministic_result)
+		return _serialize_result(
+			_enrich_justification(
+				deterministic_result,
+				normalized_ticket=normalized_ticket,
+				top_chunk=None,
+			)
+		)
 
 	retrieved_chunks: tuple[RetrievedChunk, ...] = ()
 	if resolved_company is not None or ai_mode is AIMode.TRIAGE:
@@ -907,7 +954,7 @@ def process_ticket(
 			)
 		)
 
-	deterministic_result, _ = _build_deterministic_result(
+	deterministic_result, top_chunk = _build_deterministic_result(
 		normalized_ticket=normalized_ticket,
 		resolved_company=resolved_company,
 		safety_decision=safety_decision,
@@ -953,4 +1000,10 @@ def process_ticket(
 		final_result=final_result,
 		trace=trace,
 	)
-	return _serialize_result(final_result)
+	return _serialize_result(
+		_enrich_justification(
+			final_result,
+			normalized_ticket=normalized_ticket,
+			top_chunk=top_chunk,
+		)
+	)
