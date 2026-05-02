@@ -54,6 +54,14 @@ def _retrieval_near_tie(retrieved_chunks: tuple[RetrievedChunk, ...]) -> bool:
 	return second_score >= (top_score * TRIAGE_NEAR_TIE_SCORE_RATIO)
 
 
+def _top_chunk_source_diversity(retrieved_chunks: tuple[RetrievedChunk, ...]) -> bool:
+	if len(retrieved_chunks) < 2:
+		return False
+	first_source = (retrieved_chunks[0].source_path or "").lower()
+	second_source = (retrieved_chunks[1].source_path or "").lower()
+	return bool(first_source and second_source and first_source != second_source)
+
+
 def _top_chunk_product_area_conflict(
 	*,
 	retrieved_chunks: tuple[RetrievedChunk, ...],
@@ -94,7 +102,9 @@ def triage_budget_reasons(
 		resolved_company=resolved_company,
 	):
 		reasons.append("conflicting_top_chunk_product_area")
-	elif specific_alternatives and _retrieval_near_tie(retrieved_chunks):
+	elif _retrieval_near_tie(retrieved_chunks) and (
+		specific_alternatives or _top_chunk_source_diversity(retrieved_chunks)
+	):
 		reasons.append("near_tie_retrieval")
 	return tuple(reasons)
 
