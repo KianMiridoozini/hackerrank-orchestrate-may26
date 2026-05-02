@@ -646,6 +646,7 @@ def _apply_synthesis_mode(
 	if not llm_result.succeeded or llm_result.value is None:
 		trace["outcome"] = f"synthesis_rejected_{llm_result.failure_reason or 'llm_unavailable'}"
 		return deterministic_result, trace
+	trace["evidence_support"] = llm_result.value.evidence_support
 
 	response_reason = validate_customer_text(
 		"response",
@@ -748,6 +749,7 @@ def _apply_triage_mode(
 	if not llm_result.succeeded or llm_result.value is None:
 		trace["outcome"] = f"triage_rejected_{llm_result.failure_reason or 'llm_unavailable'}"
 		return deterministic_result, trace
+	trace["evidence_support"] = llm_result.value.evidence_support
 
 	if hard_safety_veto and llm_result.value.status is not TicketStatus.ESCALATED:
 		trace["outcome"] = "triage_rejected_hard_safety_veto_status_change"
@@ -883,6 +885,52 @@ def _enum_value(value: Any) -> Any:
 	return value
 
 
+def _trace_decision(outcome: str, *, llm_called: bool) -> str:
+	normalized_outcome = outcome.strip().lower()
+	if normalized_outcome == "skipped_off":
+		return "skipped"
+	if normalized_outcome.startswith("vetoed_"):
+		return "skipped"
+	if "_skipped_" in normalized_outcome or normalized_outcome.startswith("skipped_"):
+		return "skipped"
+	if "_rejected_" in normalized_outcome or normalized_outcome.startswith("review_rejected_"):
+		return "rejected"
+	if normalized_outcome.endswith("_accepted") or normalized_outcome.startswith("review_called_"):
+		return "accepted"
+	return "accepted" if llm_called else "skipped"
+
+
+def _trace_rejection_reason(outcome: str) -> str | None:
+	normalized_outcome = outcome.strip().lower()
+	if "_rejected_" not in normalized_outcome:
+		return None
+	return normalized_outcome.split("_rejected_", 1)[1] or None
+
+
+def _categorical_changes(
+	*,
+	deterministic_result: OutputRow,
+	final_result: OutputRow,
+) -> dict[str, dict[str, str]]:
+	changes: dict[str, dict[str, str]] = {}
+	if deterministic_result.status is not final_result.status:
+		changes["status"] = {
+			"from": deterministic_result.status.value,
+			"to": final_result.status.value,
+		}
+	if deterministic_result.request_type is not final_result.request_type:
+		changes["request_type"] = {
+			"from": deterministic_result.request_type.value,
+			"to": final_result.request_type.value,
+		}
+	if deterministic_result.product_area != final_result.product_area:
+		changes["product_area"] = {
+			"from": deterministic_result.product_area,
+			"to": final_result.product_area,
+		}
+	return changes
+
+
 def _append_ai_trace(
 	*,
 	ai_mode: AIMode,
@@ -892,19 +940,35 @@ def _append_ai_trace(
 	final_result: OutputRow,
 	trace: Mapping[str, Any],
 ) -> None:
+	outcome = str(trace.get("outcome", "unknown"))
+	llm_called = bool(trace.get("llm_called", False))
+	details = {key: _enum_value(value) for key, value in (trace.get("details") or {}).items()}
+	decision = _trace_decision(outcome, llm_called=llm_called)
+	rejection_reason = _trace_rejection_reason(outcome)
+	categorical_changes = _categorical_changes(
+		deterministic_result=deterministic_result,
+		final_result=final_result,
+	)
 	entry = {
 		"timestamp": datetime.now(timezone.utc).isoformat(),
+		"ai_mode": ai_mode.value,
 		"mode": ai_mode.value,
 		"company": (resolved_company or _trusted_company(normalized_ticket.company) or Company.NONE).value,
 		"subject": normalized_ticket.subject or "",
 		"issue_preview": normalized_ticket.issue[:160],
-		"outcome": trace.get("outcome", "unknown"),
-		"llm_called": bool(trace.get("llm_called", False)),
+		"outcome": outcome,
+		"decision": decision,
+		"llm_called": llm_called,
+		"rejection_reason": rejection_reason,
 		"provider": trace.get("provider"),
 		"model": trace.get("model"),
 		"failure_reason": trace.get("failure_reason"),
+		"hard_safety_veto": bool(details.get("hard_safety_veto", False)),
+		"budget_reasons": list(details.get("budget_reasons") or []),
+		"evidence_support": _enum_value(trace.get("evidence_support")),
+		"categorical_changes": categorical_changes if decision == "accepted" else {},
 		"warnings": trace.get("warnings", []),
-		"details": {key: _enum_value(value) for key, value in (trace.get("details") or {}).items()},
+		"details": details,
 		"candidate_product_areas": trace.get("candidate_product_areas", []),
 		"deterministic": {
 			"status": deterministic_result.status.value,
