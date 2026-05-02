@@ -20,8 +20,8 @@ class ProviderSettings:
 
 
 REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[2]
-REPO_ENV_PATH: Final[Path] = REPO_ROOT / ".env"
 CODE_ROOT: Final[Path] = REPO_ROOT / "code"
+CODE_ENV_PATH: Final[Path] = CODE_ROOT / ".env"
 DATA_ROOT: Final[Path] = REPO_ROOT / "data"
 
 
@@ -47,12 +47,12 @@ def _normalize_env_assignment(raw_line: str) -> tuple[str, str] | None:
 	return key, value
 
 
-def load_repo_env(
-	env_path: Path = REPO_ENV_PATH,
+def load_code_env(
+	env_path: Path = CODE_ENV_PATH,
 	*,
 	environ: MutableMapping[str, str] | None = None,
 ) -> None:
-	"""Populate os.environ from the repo-root .env file without overriding exports."""
+	"""Populate os.environ from code/.env without overriding exported values."""
 
 	target_environ = os.environ if environ is None else environ
 	if not env_path.is_file():
@@ -72,7 +72,7 @@ def load_repo_env(
 		return
 
 
-load_repo_env()
+load_code_env()
 
 SUPPORT_INPUT_DIR_CANDIDATES: Final[tuple[str, ...]] = (
 	"support_tickets",

@@ -22,7 +22,7 @@ code/
 - Python 3.14 was used in this workspace, but any modern Python 3.x runtime that supports the current `pydantic` version should work.
 - One external Python dependency is required for the current implementation: `pydantic`.
 - The deterministic baseline works without any LLM API keys.
-- Optional AI modes read configuration from the repo-root `.env` file if present.
+- Optional AI modes read configuration from `code/.env` if present.
 
 ## Setup
 
@@ -42,15 +42,16 @@ pip install pydantic
 
 Optional environment setup:
 
-1. Copy `.env.example` to `.env` in the repository root.
+1. Copy `.env.example` to `.env` in `code/`.
 2. Add provider keys only if you want to use optional AI modes.
-3. Leave `AI_MODE` unset or set it to `off` for the deterministic baseline, or `trage` to set the full triage version.
+3. Leave `AI_MODE` unset or set it to `off` for the deterministic baseline, or `triage` to enable the full triage overlay.
 
 Important behavior:
 
-- The repo auto-loads the repo-root `.env` file through `code/core/config.py`.
+- The repo auto-loads `code/.env` through `code/core/config.py`.
 - Shell-exported environment variables override `.env` values.
 - The default safe mode is deterministic `AI_MODE=off` unless you explicitly enable an AI mode.
+- Keep `code/.env` local-only and out of any submission zip.
 
 ## Run The Batch Job
 

@@ -186,8 +186,8 @@ without updating this file.
 ├── AGENTS.md                    # this file
 ├── README.md                    # human-facing quickstart
 ├── .gitignore
-├── .env.example                 # copy to .env; never commit .env
 ├── code/
+│   ├── .env.example             # copy to .env; never commit .env
 │   ├── your_file.py
 │   ├── agent.py
 │   └── main.py

@@ -72,7 +72,7 @@ All of your work belongs in [`code/`](./code/). The repo ships with an empty `co
 Conventions:
 
 - Put a **README inside `code/`** describing how to install dependencies and run your agent.
-- Read secrets **from environment variables only** (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, …). Copy `.env.example` → `.env` (already gitignored) if you keep one. **Never hardcode keys.**
+- Read secrets **from environment variables only** (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, …). Copy `code/.env.example` → `code/.env` (already gitignored) if you keep one. **Never hardcode keys.**
 - Be **deterministic** where possible. Seed any random sampling.
 - Write responses to `support_tickets/output.csv`.
 
@@ -111,7 +111,7 @@ Submit on the HackerRank Community Platform:
 
 You will upload **three** files:
 
-1. **Code zip** — zip your `code/` directory and upload it. Exclude virtualenvs, `node_modules`, build artifacts, the `data/` corpus, and the `support_tickets/` CSVs.
+1. **Code zip** — zip your `code/` directory and upload it. Exclude virtualenvs, `node_modules`, build artifacts, any `.env` files, the `data/` corpus, and the `support_tickets/` CSVs.
 2. **Predictions CSV** — your agent's output for `support_tickets/support_tickets.csv` (i.e. the populated `output.csv`).
 3. **Chat transcript** — the `log.txt` from the path in [Chat transcript logging](#chat-transcript-logging).
 
