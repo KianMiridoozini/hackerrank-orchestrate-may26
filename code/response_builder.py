@@ -466,6 +466,93 @@ def _build_resume_builder_reply(
 	return response, _note("Replied using the available HackerRank Resume Builder guidance, which only covers supported creation flows")
 
 
+def _build_submission_issue_reply(
+	*,
+	query_tokens: frozenset[str],
+	retrieved_chunks: Sequence[RetrievedChunk],
+) -> tuple[str, str] | None:
+	if not ({"submission", "submissions", "challenge", "challenges", "practice", "apply"} & query_tokens):
+		return None
+	if not ({"working", "load", "results", "tab"} & query_tokens):
+		return None
+	faq_chunk = _first_chunk_matching(
+		retrieved_chunks,
+		lambda chunk: "coding-challenges-faqs" in chunk.source_path.lower(),
+	)
+	if faq_chunk is None:
+		return None
+	response = (
+		"Try closing the challenge window and reopening it with the same link, then retry in the latest version of Chrome, Firefox, or Edge. "
+		"Also confirm your internet connection is stable. If results still do not appear after processing, contact help@hackerrank.com with the issue details."
+	)
+	return response, _note("Used HackerRank coding-challenge troubleshooting guidance for challenge loading and submission issues")
+
+
+def _build_zoom_compatibility_reply(
+	*,
+	query_tokens: frozenset[str],
+	retrieved_chunks: Sequence[RetrievedChunk],
+) -> tuple[str, str] | None:
+	if not (
+		{"compatibility", "compatible", "connectivity"} & query_tokens
+		and {"zoom", "interview", "browser", "network", "system"} & query_tokens
+	):
+		return None
+	compatibility_chunk = _first_chunk_matching(
+		retrieved_chunks,
+		lambda chunk: "audio-and-video-calls-in-interviews-powered-by-zoom" in chunk.source_path.lower(),
+	)
+	if compatibility_chunk is None:
+		return None
+	response = (
+		"Open the HackerRank compatibility check page and confirm the audio, video, browser, and network checks all pass. "
+		"Use the latest Chrome, Edge, or Firefox, and make sure your network allows zoom.us domains. "
+		"If the compatibility check still fails, send support@hackerrank.com a screenshot of the error."
+	)
+	return response, _note("Used HackerRank Zoom compatibility guidance for interview audio, video, and network setup")
+
+
+def _build_virtual_lobby_reply(
+	*,
+	query_tokens: frozenset[str],
+	retrieved_chunks: Sequence[RetrievedChunk],
+) -> tuple[str, str] | None:
+	if not ({"lobby", "inactivity", "screen", "share", "interviewer", "candidate"} & query_tokens):
+		return None
+	lobby_chunk = _first_chunk_matching(
+		retrieved_chunks,
+		lambda chunk: "using-virtual-lobby-in-hackerrank-interviews" in chunk.source_path.lower(),
+	)
+	if lobby_chunk is None:
+		return None
+	response = (
+		"The Virtual Lobby feature moves candidates into a waiting room before the interview and also pushes them back to the lobby when all interviewers leave the session. "
+		"If you want that behavior available, enable Virtual Lobby in interview settings first, because it is not on by default. "
+		"I did not find support guidance for changing a separate inactivity timer here, so contact support if you need that setting confirmed or adjusted."
+	)
+	return response, _note("Used HackerRank Virtual Lobby guidance to explain why candidates return to the lobby and where to enable the feature")
+
+
+def _build_mock_interview_refund_reply(
+	*,
+	query_tokens: frozenset[str],
+	retrieved_chunks: Sequence[RetrievedChunk],
+) -> tuple[str, str] | None:
+	if not ({"mock", "interview", "interviews"} & query_tokens and {"refund", "payment", "credits"} & query_tokens):
+		return None
+	refund_chunk = _first_chunk_matching(
+		retrieved_chunks,
+		lambda chunk: "purchase-mock-interviews" in chunk.source_path.lower() or "payments-and-billing-faqs" in chunk.source_path.lower(),
+	)
+	if refund_chunk is None:
+		return None
+	response = (
+		"If the mock interview purchase was accidental or you were not satisfied with the session, contact help@hackerrank.com and describe what happened so the support team can review the refund request. "
+		"If the payment itself failed or an amount was deducted incorrectly, refresh the page and retry first; incorrect deductions are refunded within 5 to 10 business days according to the billing FAQ."
+	)
+	return response, _note("Used HackerRank mock-interview billing guidance for refund review and payment troubleshooting")
+
+
 def _build_conversation_deletion_reply(
 	*,
 	query_tokens: frozenset[str],
@@ -606,6 +693,10 @@ def _build_replied_response(
 	for builder in (
 		_build_reschedule_reply,
 		_build_remove_user_reply,
+		_build_submission_issue_reply,
+		_build_zoom_compatibility_reply,
+		_build_virtual_lobby_reply,
+		_build_mock_interview_refund_reply,
 		_build_conversation_deletion_reply,
 		_build_account_deletion_reply,
 		_build_data_retention_reply,
@@ -624,6 +715,42 @@ def _build_replied_response(
 		if result is not None:
 			return result
 	return _build_generic_reply(normalized_ticket=normalized_ticket, retrieved_chunks=retrieved_chunks)
+
+
+def _build_constructive_escalation_response(
+	decision: SafetyDecision,
+	*,
+	normalized_ticket: NormalizedTicket | None,
+	retrieved_chunks: Sequence[RetrievedChunk],
+) -> tuple[str, str, RetrievedChunk | None] | None:
+	if normalized_ticket is None or not retrieved_chunks:
+		return None
+	if decision.category not in {EscalationCategory.BILLING_DISPUTE, EscalationCategory.WEAK_EVIDENCE}:
+		return None
+	query_tokens = _ticket_query_tokens(normalized_ticket)
+	for builder, predicate in (
+		(
+			_build_mock_interview_refund_reply,
+			lambda chunk: "purchase-mock-interviews" in chunk.source_path.lower() or "payments-and-billing-faqs" in chunk.source_path.lower(),
+		),
+		(
+			_build_zoom_compatibility_reply,
+			lambda chunk: "audio-and-video-calls-in-interviews-powered-by-zoom" in chunk.source_path.lower(),
+		),
+		(
+			_build_virtual_lobby_reply,
+			lambda chunk: "using-virtual-lobby-in-hackerrank-interviews" in chunk.source_path.lower(),
+		),
+		(
+			_build_submission_issue_reply,
+			lambda chunk: "coding-challenges-faqs" in chunk.source_path.lower(),
+		),
+	):
+		result = builder(query_tokens=query_tokens, retrieved_chunks=retrieved_chunks)
+		if result is not None:
+			response, note = result
+			return response, note, _first_chunk_matching(retrieved_chunks, predicate)
+	return None
 
 
 def build_reply_result(
@@ -676,21 +803,44 @@ def build_escalation_result(
 	decision: SafetyDecision,
 	*,
 	resolved_company: Company | None,
+	normalized_ticket: NormalizedTicket | None = None,
+	retrieved_chunks: Sequence[RetrievedChunk] = (),
 	top_chunk: RetrievedChunk | None = None,
 ) -> OutputRow:
 	product_area = default_product_area_for_company(resolved_company)
-	if top_chunk is not None:
+	if decision.category in {EscalationCategory.BILLING_DISPUTE, EscalationCategory.WEAK_EVIDENCE} and top_chunk is not None:
 		product_area = map_retrieved_chunk_to_product_area(top_chunk, resolved_company)
+	constructive_result = _build_constructive_escalation_response(
+		decision,
+		normalized_ticket=normalized_ticket,
+		retrieved_chunks=retrieved_chunks,
+	)
+	response = build_escalation_response(decision.category, company=resolved_company)
+	justification = build_escalation_justification(
+		decision,
+		product_area=product_area,
+		resolved_company=resolved_company,
+		top_chunk=top_chunk,
+	)
+	if constructive_result is not None:
+		response, note, guidance_chunk = constructive_result
+		if guidance_chunk is not None:
+			product_area = map_retrieved_chunk_to_product_area(guidance_chunk, resolved_company)
+		if decision.category is EscalationCategory.WEAK_EVIDENCE:
+			if guidance_chunk is not None:
+				justification = (
+					"Escalated because the available support material only partially resolved the request. "
+					f"The best usable guidance was about {_friendly_evidence_label(guidance_chunk).lower()}. {note}"
+				)
+			else:
+				justification = f"Escalated because the available support material only partially resolved the request. {note}"
+		else:
+			justification = f"{justification} {note}"
 	return OutputRow(
 		status=TicketStatus.ESCALATED,
 		product_area=product_area,
-		response=build_escalation_response(decision.category, company=resolved_company),
-		justification=build_escalation_justification(
-			decision,
-			product_area=product_area,
-			resolved_company=resolved_company,
-			top_chunk=top_chunk,
-		),
+		response=response,
+		justification=justification,
 		request_type=decision.request_type,
 	)
 

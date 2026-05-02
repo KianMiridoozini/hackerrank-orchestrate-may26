@@ -547,6 +547,8 @@ def _build_deterministic_result(
 			build_escalation_result(
 				unresolved_domain_decision,
 				resolved_company=resolved_company,
+				normalized_ticket=normalized_ticket,
+				retrieved_chunks=retrieved_chunks,
 				top_chunk=top_chunk,
 			),
 			top_chunk,
@@ -563,6 +565,8 @@ def _build_deterministic_result(
 			build_escalation_result(
 				weak_evidence_decision,
 				resolved_company=resolved_company,
+				normalized_ticket=normalized_ticket,
+				retrieved_chunks=retrieved_chunks,
 				top_chunk=top_chunk,
 			),
 			top_chunk,
@@ -578,6 +582,8 @@ def _build_deterministic_result(
 			build_escalation_result(
 				no_results_decision,
 				resolved_company=resolved_company,
+				normalized_ticket=normalized_ticket,
+				retrieved_chunks=retrieved_chunks,
 			),
 			top_chunk,
 		)
@@ -1027,7 +1033,13 @@ def process_ticket(
 		)
 
 	if safety_decision.should_escalate:
-		deterministic_result = build_escalation_result(safety_decision, resolved_company=resolved_company)
+		deterministic_result = build_escalation_result(
+			safety_decision,
+			resolved_company=resolved_company,
+			normalized_ticket=normalized_ticket,
+			retrieved_chunks=retrieved_chunks,
+			top_chunk=retrieved_chunks[0] if retrieved_chunks else None,
+		)
 	else:
 		deterministic_result, _ = _build_deterministic_result(
 			normalized_ticket=normalized_ticket,

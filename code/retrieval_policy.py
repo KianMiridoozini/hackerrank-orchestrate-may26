@@ -55,8 +55,8 @@ QUERY_EXPANSION_RULES: Final[tuple[tuple[frozenset[str], tuple[str, ...]], ...]]
 	(frozenset({"travelers"}), ("traveller", "travellers", "issuer")),
 	(frozenset({"cheque"}), ("cheques", "travellers", "travelers")),
 	(frozenset({"cheques"}), ("cheque", "travellers", "travelers")),
-	(frozenset({"compatible", "zoom"}), ("compatibility", "system", "browser", "network", "interview")),
-	(frozenset({"compatible", "connectivity"}), ("compatibility", "system", "browser", "network")),
+	(frozenset({"compatible", "zoom"}), ("compatibility", "system", "browser", "network", "interview", "audio", "video", "camera", "microphone")),
+	(frozenset({"compatible", "connectivity"}), ("compatibility", "system", "browser", "network", "audio", "video", "camera", "microphone")),
 	(frozenset({"reschedule"}), ("candidate", "hiring", "recruiter", "workflow")),
 	(frozenset({"rescheduling"}), ("candidate", "hiring", "recruiter", "workflow", "reschedule")),
 	(frozenset({"assessment", "reschedule"}), ("candidate", "hiring", "recruiter", "workflow")),
@@ -185,6 +185,10 @@ def _chunk_preference_score(chunk: RetrievedChunk, query_tokens: frozenset[str])
 	if {"compatible", "zoom"} <= query_tokens or {"compatible", "connectivity"} <= query_tokens:
 		if {"compatibility", "system", "browser", "network", "zoom", "interview"} & metadata_tokens:
 			score += 3.5
+		if "audio-and-video-calls-in-interviews-powered-by-zoom" in path_text:
+			score += 16.0
+		if "/interviews/getting-started/" in path_text and {"audio", "video", "camera", "microphone"} & metadata_tokens:
+			score += 8.0
 		if "/interviews/" in path_text:
 			score += 12.0
 		if "/integrations/" in path_text:
