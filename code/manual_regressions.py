@@ -6,8 +6,8 @@ import argparse
 from dataclasses import dataclass
 from typing import Final, Sequence
 
-from agent import process_ticket
-from schemas import InputTicket
+from core.schemas import InputTicket
+from triage.agent import process_ticket
 
 
 @dataclass(frozen=True)

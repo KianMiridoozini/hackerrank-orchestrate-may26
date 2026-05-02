@@ -19,7 +19,7 @@ class ProviderSettings:
 	base_url_env: str | None = None
 
 
-REPO_ROOT: Final[Path] = Path(__file__).resolve().parent.parent
+REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[2]
 REPO_ENV_PATH: Final[Path] = REPO_ROOT / ".env"
 CODE_ROOT: Final[Path] = REPO_ROOT / "code"
 DATA_ROOT: Final[Path] = REPO_ROOT / "data"

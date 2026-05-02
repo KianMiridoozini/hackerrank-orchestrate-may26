@@ -7,9 +7,7 @@ import re
 from dataclasses import dataclass
 from typing import Final, Sequence
 
-from retrieval_policy import is_generic_product_area
-from safety import build_escalation_response
-from schemas import (
+from core.schemas import (
 	Company,
 	EscalationCategory,
 	NormalizedTicket,
@@ -19,7 +17,9 @@ from schemas import (
 	SafetyDecision,
 	TicketStatus,
 )
-from taxonomy import default_product_area_for_company, map_retrieved_chunk_to_product_area, validate_product_area
+from core.taxonomy import default_product_area_for_company, map_retrieved_chunk_to_product_area, validate_product_area
+from retrieval.retrieval_policy import is_generic_product_area
+from triage.safety import build_escalation_response
 
 
 WHITESPACE_PATTERN: Final[re.Pattern[str]] = re.compile(r"\s+")

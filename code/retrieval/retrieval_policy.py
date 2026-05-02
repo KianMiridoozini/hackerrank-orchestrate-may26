@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import Final
 
-from schemas import RetrievedChunk
+from core.schemas import RetrievedChunk
 
 
 TOKEN_PATTERN: Final[re.Pattern[str]] = re.compile(r"[a-z0-9]+")

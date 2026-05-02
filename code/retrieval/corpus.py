@@ -9,8 +9,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Final, Iterable, Sequence
 
-from config import CORPUS_CACHE_PATH, DATA_ROOT, DEFAULT_ENCODING
-from schemas import Company
+from core.config import CORPUS_CACHE_PATH, DATA_ROOT, DEFAULT_ENCODING
+from core.schemas import Company
 
 
 DOMAIN_BY_FOLDER: Final[dict[str, Company]] = {

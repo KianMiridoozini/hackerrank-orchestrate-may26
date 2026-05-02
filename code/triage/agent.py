@@ -10,14 +10,10 @@ from collections import Counter
 from datetime import datetime, timezone
 from typing import Any, Final, Mapping
 
-from ai_validation import resolve_should_escalate_reason, triage_budget_reasons, validate_customer_text
-from config import AI_MODE_ENV, AI_TRACE_PATH, DEFAULT_AI_MODE
-from llm import Transport, call_structured_llm
-from response_builder import build_escalation_result, build_invalid_result, build_replied_justification, build_reply_result
-from retrieval_policy import expand_query_text, rerank_retrieved_chunks
-from retriever import build_query_text, retrieve_chunks
-from safety import assess_ticket_safety, evaluate_retrieval_safety
-from schemas import (
+from ai.ai_validation import resolve_should_escalate_reason, triage_budget_reasons, validate_customer_text
+from ai.llm import Transport, call_structured_llm
+from core.config import AI_MODE_ENV, AI_TRACE_PATH, DEFAULT_AI_MODE
+from core.schemas import (
 	AIMode,
 	Company,
 	EvidenceSupport,
@@ -31,7 +27,11 @@ from schemas import (
 	SupportModel,
 	TicketStatus,
 )
-from taxonomy import default_product_area_for_company, get_product_area_taxonomy, map_retrieved_chunk_to_product_area, validate_product_area
+from core.taxonomy import default_product_area_for_company, get_product_area_taxonomy, map_retrieved_chunk_to_product_area, validate_product_area
+from retrieval.retrieval_policy import expand_query_text, rerank_retrieved_chunks
+from retrieval.retriever import build_query_text, retrieve_chunks
+from triage.response_builder import build_escalation_result, build_invalid_result, build_replied_justification, build_reply_result
+from triage.safety import assess_ticket_safety, evaluate_retrieval_safety
 
 
 WHITESPACE_PATTERN: Final[re.Pattern[str]] = re.compile(r"\s+")

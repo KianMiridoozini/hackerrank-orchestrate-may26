@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import Final, Sequence
 
-from schemas import (
+from core.schemas import (
 	Company,
 	EscalationCategory,
 	InputTicket,

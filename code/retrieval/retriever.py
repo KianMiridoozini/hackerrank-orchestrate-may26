@@ -9,9 +9,9 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Final
 
-from corpus import CorpusChunk, load_corpus_chunks
-from schemas import Company, RetrievedChunk
-from taxonomy import map_evidence_to_product_area
+from core.schemas import Company, RetrievedChunk
+from core.taxonomy import map_evidence_to_product_area
+from retrieval.corpus import CorpusChunk, load_corpus_chunks
 
 
 TOKEN_PATTERN: Final[re.Pattern[str]] = re.compile(r"[a-z0-9]+")

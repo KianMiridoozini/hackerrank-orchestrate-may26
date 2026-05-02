@@ -10,10 +10,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Mapping, Sequence
 
-from config import DEFAULT_ENCODING, SAMPLE_TICKETS_PATH
+from core.config import DEFAULT_ENCODING, SAMPLE_TICKETS_PATH
 from main import build_output_rows, load_input_tickets, load_sample_header
-from schemas import RequestType, TicketStatus
-from taxonomy import normalize_product_area, validate_product_area
+from core.schemas import RequestType, TicketStatus
+from core.taxonomy import normalize_product_area, validate_product_area
 
 
 COMPARISON_FIELDS: Final[tuple[str, ...]] = (

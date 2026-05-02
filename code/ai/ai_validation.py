@@ -5,8 +5,8 @@ from __future__ import annotations
 import re
 from typing import Final
 
-from schemas import Company, OutputRow, RequestType, RetrievedChunk, TicketStatus
-from taxonomy import map_retrieved_chunk_to_product_area
+from core.schemas import Company, OutputRow, RequestType, RetrievedChunk, TicketStatus
+from core.taxonomy import map_retrieved_chunk_to_product_area
 
 
 WHITESPACE_PATTERN: Final[re.Pattern[str]] = re.compile(r"\s+")

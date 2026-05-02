@@ -8,9 +8,9 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
-from agent import process_ticket
-from config import DEFAULT_ENCODING, INPUT_TICKETS_PATH, OUTPUT_TICKETS_PATH, SAMPLE_TICKETS_PATH
-from schemas import InputTicket
+from core.config import DEFAULT_ENCODING, INPUT_TICKETS_PATH, OUTPUT_TICKETS_PATH, SAMPLE_TICKETS_PATH
+from core.schemas import InputTicket
+from triage.agent import process_ticket
 
 
 REQUIRED_SAMPLE_COLUMNS: tuple[str, ...] = (

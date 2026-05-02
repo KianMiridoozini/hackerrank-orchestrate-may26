@@ -11,13 +11,13 @@ from dataclasses import dataclass
 from typing import Any, Callable, Final, Generic, Mapping, TypeVar
 from urllib import error, parse, request
 
-from config import (
+from core.config import (
 	DEFAULT_MODEL_TEMPERATURE,
 	DEFAULT_PROVIDER_NAME,
 	DEFAULT_PROVIDER_TIMEOUT_SECONDS,
 	PROVIDER_SETTINGS,
 )
-from schemas import SupportModel
+from core.schemas import SupportModel
 
 
 ModelT = TypeVar("ModelT", bound=SupportModel)

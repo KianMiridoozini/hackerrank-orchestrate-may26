@@ -9,8 +9,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Final, Iterable, Sequence
 
-from config import DATA_ROOT, DEFAULT_ENCODING, SAMPLE_TICKETS_PATH
-from schemas import Company, RetrievedChunk
+from core.config import DATA_ROOT, DEFAULT_ENCODING, SAMPLE_TICKETS_PATH
+from core.schemas import Company, RetrievedChunk
 
 
 NORMALIZE_PATTERN: Final[re.Pattern[str]] = re.compile(r"[^a-z0-9]+")
