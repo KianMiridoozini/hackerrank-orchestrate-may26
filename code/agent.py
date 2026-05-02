@@ -52,10 +52,13 @@ SYNTHESIS_SYSTEM_PROMPT: Final[str] = (
 )
 TRIAGE_SYSTEM_PROMPT: Final[str] = (
 	"You are a bounded support-triage reasoner. Use only the supplied ticket fields, allowed label values, "
-	"candidate product areas, deterministic fallback output, and local retrieved evidence. "
-	"Do not use outside knowledge. If the evidence is weak or conflicting, escalate or return the fallback. "
+	"candidate product areas, deterministic fallback output, escalation context, and local retrieved evidence. "
+	"Use only the supplied local evidence and do not use outside knowledge. "
+	"Prefer the fallback status, request type, and product area unless the local evidence clearly supports a different allowed value. "
+	"If the evidence is weak, partial, or conflicting, escalate or return the fallback. "
+	"If hard_safety_veto=true, keep the fallback status, request type, and product area unchanged. "
 	"If you reuse fallback wording, rewrite any internal support-note phrasing into plain customer-facing language. "
-	"Do not mention source paths, scores, evidence labels, or internal reasoning in the response or justification."
+	"Do not mention source paths, scores, evidence labels, URLs, fallback markers, or internal reasoning in the response or justification."
 )
 REVIEW_SYSTEM_PROMPT: Final[str] = (
 	"You review a deterministic support-ticket output against supplied local evidence. "
@@ -328,6 +331,14 @@ def _evidence_label(chunk: RetrievedChunk) -> str:
 	return chunk.title.strip()
 
 
+def _evidence_topic(chunk: RetrievedChunk) -> str:
+	title = chunk.title.strip()
+	label = _evidence_label(chunk)
+	if title and label and label.lower() != title.lower():
+		return f"{title} - {label}"
+	return label or title
+
+
 def _chunk_support_lines(chunk: RetrievedChunk) -> list[str]:
 	labels = {chunk.title.lower()}
 	if chunk.heading:
@@ -350,17 +361,33 @@ def _chunk_support_lines(chunk: RetrievedChunk) -> list[str]:
 	return selected_lines
 
 
-def _build_evidence_prompt(retrieved_chunks: tuple[RetrievedChunk, ...]) -> str:
+def _build_evidence_prompt(
+	*,
+	retrieved_chunks: tuple[RetrievedChunk, ...],
+	resolved_company: Company | None,
+) -> str:
 	blocks: list[str] = []
 	for index, chunk in enumerate(retrieved_chunks[:AI_EVIDENCE_LIMIT], start=1):
 		summary_lines = _chunk_support_lines(chunk)[:3]
-		summary_text = " ".join(summary_lines) if summary_lines else _evidence_label(chunk)
+		summary_text = " ".join(summary_lines) if summary_lines else _evidence_topic(chunk)
+		candidate_product_area = map_retrieved_chunk_to_product_area(chunk, resolved_company)
 		blocks.append(
-			f"Evidence {index}:\n"
-			f"topic: {_evidence_label(chunk)}\n"
+			f"Evidence snippet {index}:\n"
+			f"topic: {_evidence_topic(chunk)}\n"
+			f"candidate_product_area: {candidate_product_area}\n"
 			f"content: {_normalize_output_text(summary_text)}"
 		)
 	return "\n\n".join(blocks) if blocks else "No retrieved evidence was available."
+
+
+def _deterministic_escalation_kind(
+	*,
+	deterministic_result: OutputRow,
+	hard_safety_veto: bool,
+) -> str:
+	if deterministic_result.status is not TicketStatus.ESCALATED:
+		return "none"
+	return "hard" if hard_safety_veto else "soft"
 
 
 def _candidate_product_areas(
@@ -398,7 +425,7 @@ def _build_synthesis_prompt(
 ) -> str:
 	company_text = resolved_company.value if resolved_company is not None else "unresolved"
 	subject_text = normalized_ticket.normalized_subject or "(none)"
-	evidence_text = _build_evidence_prompt(retrieved_chunks)
+	evidence_text = _build_evidence_prompt(retrieved_chunks=retrieved_chunks, resolved_company=resolved_company)
 	return (
 		f"company: {company_text}\n"
 		f"status: {deterministic_result.status.value}\n"
@@ -425,34 +452,46 @@ def _build_triage_prompt(
 ) -> str:
 	company_text = resolved_company.value if resolved_company is not None else "unresolved"
 	subject_text = normalized_ticket.normalized_subject or "(none)"
-	evidence_text = _build_evidence_prompt(retrieved_chunks)
+	evidence_text = _build_evidence_prompt(retrieved_chunks=retrieved_chunks, resolved_company=resolved_company)
 	fallback_should_escalate_reason = (
 		deterministic_result.justification
 		if deterministic_result.status is TicketStatus.ESCALATED
 		else "(none)"
 	)
+	deterministic_escalation_kind = _deterministic_escalation_kind(
+		deterministic_result=deterministic_result,
+		hard_safety_veto=hard_safety_veto,
+	)
 	status_values = ", ".join(status.value for status in TicketStatus)
 	request_type_values = ", ".join(request_type.value for request_type in RequestType)
 	product_area_values = ", ".join(candidate_product_areas)
 	return (
-		f"company: {company_text}\n"
+		f"company_or_domain: {company_text}\n"
 		f"subject: {subject_text}\n"
 		f"issue: {normalized_ticket.normalized_issue}\n"
 		f"allowed_status_values: {status_values}\n"
 		f"allowed_request_type_values: {request_type_values}\n"
 		f"candidate_product_areas: {product_area_values}\n"
 		f"hard_safety_veto: {'true' if hard_safety_veto else 'false'}\n"
+		f"deterministic_escalation_kind: {deterministic_escalation_kind}\n"
 		f"fallback_status: {deterministic_result.status.value}\n"
 		f"fallback_request_type: {deterministic_result.request_type.value}\n"
 		f"fallback_product_area: {deterministic_result.product_area}\n"
 		f"fallback_response: {deterministic_result.response}\n"
 		f"fallback_justification: {deterministic_result.justification}\n"
 		f"fallback_should_escalate_reason: {fallback_should_escalate_reason}\n\n"
-		"Use only the local evidence below. If support is weak or conflicting, either escalate with a concise should_escalate_reason or return the fallback. "
-		"Do not use outside knowledge. Do not mention source paths, scores, evidence labels, or internal reasoning. "
-		"If hard_safety_veto=true, do not change escalated to replied. "
-		"If you choose status=escalated, you must provide should_escalate_reason. If the fallback is already escalated and you agree with it, reuse or rewrite fallback_should_escalate_reason concisely. "
-		"If you reuse fallback wording, rewrite any internal support-note phrasing into plain customer-facing language.\n\n"
+		"Rules:\n"
+		"1. Use only the supplied local evidence snippets below. Do not use outside knowledge.\n"
+		"2. Return only allowed_status_values, allowed_request_type_values, and candidate_product_areas.\n"
+		"3. Only change fallback_status, fallback_request_type, or fallback_product_area when the local evidence clearly and specifically supports a better allowed value.\n"
+		"4. If multiple statuses are plausible, keep fallback_status. If multiple product areas are plausible, keep fallback_product_area.\n"
+		"5. If evidence is insufficient, partial, or conflicting, either return the fallback or choose status=escalated with a concise should_escalate_reason.\n"
+		"6. If hard_safety_veto=true, keep the fallback status, request_type, and product_area unchanged and do not change escalated to replied.\n"
+		"7. deterministic_escalation_kind=hard means the deterministic escalation came from a hard safety rule; deterministic_escalation_kind=soft means it came from repairable or weak-evidence conditions.\n"
+		"8. If you choose status=escalated, you must provide should_escalate_reason. If the fallback is already escalated and you agree with it, reuse or rewrite fallback_should_escalate_reason concisely.\n"
+		"9. Rewrite any reused fallback wording into plain customer-facing language.\n"
+		"10. Do not mention source paths, scores, evidence labels, URLs, or internal reasoning.\n\n"
+		"Evidence snippets:\n"
 		f"{evidence_text}"
 	)
 
@@ -466,7 +505,7 @@ def _build_review_prompt(
 ) -> str:
 	company_text = resolved_company.value if resolved_company is not None else "unresolved"
 	subject_text = normalized_ticket.normalized_subject or "(none)"
-	evidence_text = _build_evidence_prompt(retrieved_chunks)
+	evidence_text = _build_evidence_prompt(retrieved_chunks=retrieved_chunks, resolved_company=resolved_company)
 	return (
 		f"company: {company_text}\n"
 		f"subject: {subject_text}\n"
